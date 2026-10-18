@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>LoginWindow</class>
+ <widget class="QDialog" name="LoginWindow">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>440</width><height>580</height></rect>
+  </property>
+  <property name="windowTitle"><string>ACOUSTIMETER — Connexion</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing"><number>0</number></property>
+   <property name="margin"><number>0</number></property>
+   <item>
+    <widget class="QFrame" name="headerFrame">
+     <layout class="QHBoxLayout" name="headerLayout">
+      <property name="leftMargin"><number>16</number></property>
+      <property name="topMargin"><number>12</number></property>
+      <property name="rightMargin"><number>16</number></property>
+      <property name="bottomMargin"><number>12</number></property>
+      <property name="spacing"><number>14</number></property>
+      <item>
+       <widget class="QFrame" name="niBadge">
+        <property name="minimumSize"><size><width>60</width><height>48</height></size></property>
+        <layout class="QVBoxLayout" name="niBadgeLayout">
+         <property name="leftMargin"><number>8</number></property>
+         <property name="topMargin"><number>4</number></property>
+         <property name="rightMargin"><number>8</number></property>
+         <property name="bottomMargin"><number>4</number></property>
+         <property name="spacing"><number>2</number></property>
+         <item><widget class="QLabel" name="niLabel"><property name="text"><string>NI</string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item>
+         <item><widget class="QLabel" name="niModel"><property name="text"><string>PXIe-8301</string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <layout class="QVBoxLayout" name="titleLayout">
+        <property name="spacing"><number>3</number></property>
+        <item><widget class="QLabel" name="logoLabel"><property name="text"><string>ACOUSTIMETER</string></property></widget></item>
+        <item><widget class="QLabel" name="subLabel"><property name="text"><string>Logiciel de pilotage et mesure acoustique — v1.0</string></property></widget></item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="bodyWidget">
+     <layout class="QVBoxLayout" name="bodyLayout">
+      <property name="leftMargin"><number>20</number></property>
+      <property name="topMargin"><number>14</number></property>
+      <property name="rightMargin"><number>20</number></property>
+      <property name="bottomMargin"><number>14</number></property>
+      <property name="spacing"><number>10</number></property>
+      <item><widget class="QLabel" name="secChassis"><property name="text"><string>Identification châssis PXI Express</string></property></widget></item>
+      <item>
+       <layout class="QHBoxLayout" name="chassisRow">
+        <property name="spacing"><number>8</number></property>
+        <item>
+         <layout class="QVBoxLayout"><property name="spacing"><number>3</number></property>
+          <item><widget class="QLabel"><property name="text"><string>Châssis</string></property></widget></item>
+          <item><widget class="QComboBox" name="comboChassis">
+           <item><property name="text"><string>PXI0</string></property></item>
+           <item><property name="text"><string>PXI1</string></property></item>
+           <item><property name="text"><string>PXI2</string></property></item>
+          </widget></item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout"><property name="spacing"><number>3</number></property>
+          <item><widget class="QLabel"><property name="text"><string>Slot PXIe-8301</string></property></widget></item>
+          <item><widget class="QSpinBox" name="spinSlot"><property name="minimum"><number>1</number></property><property name="maximum"><number>18</number></property><property name="value"><number>1</number></property></widget></item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QVBoxLayout"><property name="spacing"><number>3</number></property>
+          <item><widget class="QLabel"><property name="text"><string>Interface hôte</string></property></widget></item>
+          <item><widget class="QComboBox" name="comboInterface">
+           <item><property name="text"><string>Thunderbolt 3</string></property></item>
+           <item><property name="text"><string>MXI-Express</string></property></item>
+          </widget></item>
+         </layout>
+        </item>
+       </layout>
+      </item>
+      <item><widget class="QLabel" name="visaPlaceholder"><property name="text"><string>PXI0::CHASSIS1::SLOT1::INSTR</string></property></widget></item>
+      <item><widget class="QLabel" name="secProfile"><property name="text"><string>Profil utilisateur</string></property></widget></item>
+      <item><widget class="QWidget" name="profileContainer"><property name="minimumHeight"><number>36</number></property></widget></item>
+      <item>
+       <widget class="QWidget" name="pwdWidget">
+        <property name="visible"><bool>false</bool></property>
+        <layout class="QVBoxLayout" name="pwdLayout">
+         <property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property>
+         <property name="spacing"><number>3</number></property>
+         <item><widget class="QLabel"><property name="text"><string>Mot de passe administrateur</string></property></widget></item>
+         <item><widget class="QLineEdit" name="editPassword"><property name="echoMode"><enum>QLineEdit::Password</enum></property><property name="placeholderText"><string>••••••••</string></property></widget></item>
+        </layout>
+       </widget>
+      </item>
+      <item><widget class="QPushButton" name="btnConnect"><property name="text"><string>▶  Connecter au châssis</string></property><property name="minimumHeight"><number>36</number></property></widget></item>
+      <item>
+       <widget class="QWidget" name="progressWidget">
+        <property name="visible"><bool>false</bool></property>
+        <layout class="QVBoxLayout" name="progressLayout">
+         <property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property>
+         <property name="spacing"><number>4</number></property>
+         <item>
+          <layout class="QHBoxLayout">
+           <item><widget class="QLabel" name="lblProgressMsg"><property name="text"><string>Initialisation...</string></property></widget></item>
+           <item><widget class="QLabel" name="lblProgressPct"><property name="text"><string>0%</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+          </layout>
+         </item>
+         <item><widget class="QProgressBar" name="progressBar"><property name="value"><number>0</number></property><property name="textVisible"><bool>false</bool></property></widget></item>
+         <item><widget class="QListWidget" name="listSteps"><property name="maximumHeight"><number>90</number></property><property name="frameShape"><enum>QFrame::NoFrame</enum></property></widget></item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QFrame" name="footerFrame">
+     <layout class="QHBoxLayout" name="footerLayout">
+      <property name="leftMargin"><number>16</number></property><property name="topMargin"><number>6</number></property>
+      <property name="rightMargin"><number>16</number></property><property name="bottomMargin"><number>6</number></property>
+      <item><widget class="QLabel" name="lblStatus"><property name="text"><string>En attente de connexion</string></property></widget></item>
+      <item><widget class="QLabel" name="lblVersion"><property name="text"><string>NI PXIe-8301 · Thunderbolt 3 Remote Controller</string></property><property name="alignment"><set>Qt::AlignRight|Qt::AlignVCenter</set></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+</ui>

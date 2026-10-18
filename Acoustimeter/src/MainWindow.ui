@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1280</width><height>800</height></rect>
+  </property>
+  <property name="windowTitle"><string>ACOUSTIMETER — Supervision</string></property>
+  <property name="minimumSize"><size><width>1000</width><height>650</height></size></property>
+  <widget class="QWidget" name="centralWidget">
+   <layout class="QVBoxLayout" name="mainVLayout">
+    <property name="spacing"><number>0</number></property>
+    <property name="leftMargin"><number>0</number></property>
+    <property name="topMargin"><number>0</number></property>
+    <property name="rightMargin"><number>0</number></property>
+    <property name="bottomMargin"><number>0</number></property>
+    <item>
+     <widget class="QWidget" name="voieBar">
+      <property name="minimumHeight"><number>36</number></property>
+      <property name="maximumHeight"><number>36</number></property>
+      <layout class="QHBoxLayout" name="voieBarLayout">
+       <property name="leftMargin"><number>10</number></property>
+       <property name="topMargin"><number>0</number></property>
+       <property name="rightMargin"><number>10</number></property>
+       <property name="bottomMargin"><number>0</number></property>
+       <property name="spacing"><number>6</number></property>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <layout class="QHBoxLayout" name="centerLayout">
+      <property name="spacing"><number>0</number></property>
+      <item>
+       <widget class="QWidget" name="chartsContainer">
+        <layout class="QGridLayout" name="chartsGrid">
+         <property name="spacing"><number>5</number></property>
+         <property name="leftMargin"><number>6</number></property>
+         <property name="topMargin"><number>6</number></property>
+         <property name="rightMargin"><number>6</number></property>
+         <property name="bottomMargin"><number>6</number></property>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QWidget" name="sidebar">
+        <property name="minimumWidth"><number>260</number></property>
+        <property name="maximumWidth"><number>280</number></property>
+        <layout class="QVBoxLayout" name="sidebarLayout">
+         <property name="spacing"><number>0</number></property>
+         <property name="leftMargin"><number>0</number></property>
+         <property name="topMargin"><number>0</number></property>
+         <property name="rightMargin"><number>0</number></property>
+         <property name="bottomMargin"><number>0</number></property>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <widget class="QTextEdit" name="logView">
+      <property name="readOnly"><bool>true</bool></property>
+      <property name="minimumHeight"><number>85</number></property>
+      <property name="maximumHeight"><number>95</number></property>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menuBar"/>
+  <widget class="QStatusBar" name="statusBar"/>
+ </widget>
+</ui>

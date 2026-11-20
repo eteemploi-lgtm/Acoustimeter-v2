@@ -1,0 +1,61 @@
+"""Ecriture de fichiers .bin au format Acoustimeter (ACMB v1 et ACOUSBIN v1), Python 3 + numpy.
+Les fichiers produits sont lus par Acoustimeter (ACOUSBIN : fenetre Analyse) et par acoustimeter_bin.py."""
+import json
+import struct
+import numpy as np
+
+ACOUSBIN_ENTETE = 65536                               # taille fixe de la zone d'en-tete
+
+
+def write_acmb(path, entete, colonnes, donnees):
+    """entete : dict ordonne cle -> valeur (texte) ; la cle 'colonnes' est (re)ecrite a partir de `colonnes`.
+    donnees : tableau [N points x C colonnes] (NaN = non mesure)."""
+    d = np.asarray(donnees, dtype="<f8")
+    if d.ndim != 2 or d.shape[1] != len(colonnes):
+        raise ValueError("donnees : il faut une colonne par nom de colonne")
+    lignes = []
+    for k, v in entete.items():
+        lignes.append(f"{k}={','.join(colonnes) if k == 'colonnes' else v}")
+    if "colonnes" not in entete:
+        lignes.append("colonnes=" + ",".join(colonnes))
+    texte = "\n".join(lignes).encode("utf-8")
+    with open(path, "wb") as f:
+        f.write(b"ACMB")
+        f.write(struct.pack("<4I", 1, d.shape[1], d.shape[0], len(texte)))
+        f.write(texte)
+        f.write(np.ascontiguousarray(d).tobytes())        # ligne par ligne (ordre C)
+
+
+class AcousbinWriter:
+    """Ecriture progressive d'un enregistrement : open -> voie() -> ajoute()... -> close()."""
+
+    def __init__(self, path, titre="Acoustimeter", debut="2026-01-01T00:00:00", meta=None):
+        self.f = open(path, "wb")
+        self.titre, self.debut, self.meta = titre, debut, meta or {}
+        self.voies, self.evenements = [], []
+        self.f.write(b"\0" * ACOUSBIN_ENTETE)              # zone d'en-tete reservee, ecrite a la fermeture
+
+    def voie(self, nom, groupe, unite, fs, t0=0.0, dtype="f32"):
+        """Declare une voie et renvoie son index (0, 1, 2...)."""
+        self.voies.append({"nom": nom, "groupe": groupe, "unite": unite, "fs": float(fs), "t0": float(t0), "dtype": dtype})
+        return len(self.voies) - 1
+
+    def ajoute(self, index, valeurs):
+        """Ajoute un bloc de valeurs a la voie `index` (blocs de voies differentes : ordre libre)."""
+        u8 = self.voies[index]["dtype"] == "u8"
+        x = np.asarray(valeurs, dtype=np.uint8 if u8 else "<f4")
+        self.f.write(struct.pack("<2I", index, x.size))
+        self.f.write(x.tobytes())
+
+    def evenement(self, t, type_, detail=""):
+        self.evenements.append({"t": float(t), "type": type_, "detail": detail})
+
+    def close(self):
+        js = json.dumps({"titre": self.titre, "debut": self.debut, "voies": self.voies,
+                         "evenements": self.evenements, "meta": self.meta}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(js) > ACOUSBIN_ENTETE - 16:
+            raise ValueError("en-tete JSON trop long (trop de voies ou d'evenements)")
+        self.f.seek(0)
+        self.f.write(b"ACOUSBIN" + struct.pack("<2I", 1, ACOUSBIN_ENTETE))
+        self.f.write(js + b" " * (ACOUSBIN_ENTETE - 16 - len(js)))
+        self.f.close()

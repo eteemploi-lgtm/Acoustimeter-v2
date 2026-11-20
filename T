@@ -1,3 +1,242 @@
+#pragma once
+// v58 : acces materiel des scenarios
+//  - PXIe-6528 (NI-DAQmx) : entrees = port0..2 (voies 0..23), sorties = port3..5 (voies 0..23)
+//  - alimentations EA-PS 9750-12 2U : SCPI sur port COM USB (Windows)
+#include <QString>
+
+namespace Scen6528 {
+    QString inputLine(const QString& dev, int voie);    // ex. PXI1Slot7/port0/line3
+    QString outputLine(const QString& dev, int voie);   // ex. PXI1Slot7/port3/line3
+    bool write(const QString& dev, int voie, int value, bool simulate, QString* err);
+    bool read(const QString& dev, int voie, int* value, bool simulate, QString* err);
+}
+
+class EaPsu {
+public:
+    ~EaPsu() { close(); }
+    bool open(const QString& port, bool simulate, QString* err);   // passe l'alimentation en commande a distance
+    bool command(const QString& scpi, QString* err);               // envoie puis verifie SYST:ERR?
+    QString query(const QString& scpi, QString* err);
+    void close();                                                  // rend la main en local (SYST:LOCK OFF)
+    bool isOpen() const { return m_open; }
+    QString port() const { return m_port; }
+private:
+    bool writeLine(const QString& s, QString* err);
+    bool readLine(QString* line, QString* err);
+    void* m_h = nullptr; bool m_open = false, m_sim = false; QString m_port;
+};
+
+
+
+
+
+// v58 : acces materiel des scenarios (PXIe-6528 par NI-DAQmx, alimentations EA en SCPI sur port COM)
+#include "ScenarioHardware.h"
+#include <QMap>
+#include <QThread>
+#include <QElapsedTimer>
+
+#if defined(ACOUSTIMETER_WITH_NI)
+#include <NIDAQmx.h>
+#endif
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+namespace {
+QMap<int, int> g_simOut;          // etat des sorties en simulation
+#if defined(ACOUSTIMETER_WITH_NI)
+bool chk(int e, const char* where, QString* err)
+{
+    if (e >= 0) return true;
+    char buf[2048] = {0}; DAQmxGetExtendedErrorInfo(buf, sizeof(buf));
+    if (err) *err = QString("DAQmx [%1] %2 : %3").arg(where).arg(e).arg(QString::fromLocal8Bit(buf));
+    return false;
+}
+#endif
+}
+
+QString Scen6528::inputLine(const QString& dev, int v)  { return QString("%1/port%2/line%3").arg(dev.trimmed()).arg(v / 8).arg(v % 8); }
+QString Scen6528::outputLine(const QString& dev, int v) { return QString("%1/port%2/line%3").arg(dev.trimmed()).arg(3 + v / 8).arg(v % 8); }
+
+bool Scen6528::write(const QString& dev, int voie, int value, bool simulate, QString* err)
+{
+    if (voie < 0 || voie > 23) { if (err) *err = QString("voie de sortie %1 hors de 0…23").arg(voie); return false; }
+    if (simulate) { g_simOut[voie] = value ? 1 : 0; return true; }
+#if defined(ACOUSTIMETER_WITH_NI)
+    TaskHandle t = nullptr; uInt8 v = value ? 1 : 0; int32 wr = 0;
+    const QByteArray line = outputLine(dev, voie).toLocal8Bit();
+    const bool ok = chk(DAQmxCreateTask("", &t), "CreateTask", err)
+                 && chk(DAQmxCreateDOChan(t, line.constData(), "", DAQmx_Val_ChanPerLine), "CreateDOChan", err)
+                 && chk(DAQmxWriteDigitalLines(t, 1, 1, 2.0, DAQmx_Val_GroupByChannel, &v, &wr, nullptr), "WriteDigitalLines", err);
+    if (t) { DAQmxStopTask(t); DAQmxClearTask(t); }      // le 6528 garde l'etat de ses sorties
+    return ok;
+#else
+    Q_UNUSED(dev); if (err) *err = "NI-DAQmx absent de cette compilation : cochez « Simulation »"; return false;
+#endif
+}
+
+bool Scen6528::read(const QString& dev, int voie, int* value, bool simulate, QString* err)
+{
+    if (voie < 0 || voie > 23) { if (err) *err = QString("voie d’entrée %1 hors de 0…23").arg(voie); return false; }
+    if (simulate) { *value = -1; return true; }           // -1 : l'appelant simule l'arrivee de l'etat attendu
+#if defined(ACOUSTIMETER_WITH_NI)
+    TaskHandle t = nullptr; uInt8 v = 0; int32 rd = 0, bpc = 0;
+    const QByteArray line = inputLine(dev, voie).toLocal8Bit();
+    const bool ok = chk(DAQmxCreateTask("", &t), "CreateTask", err)
+                 && chk(DAQmxCreateDIChan(t, line.constData(), "", DAQmx_Val_ChanPerLine), "CreateDIChan", err)
+                 && chk(DAQmxReadDigitalLines(t, 1, 2.0, DAQmx_Val_GroupByChannel, &v, 1, &rd, &bpc, nullptr), "ReadDigitalLines", err);
+    if (t) { DAQmxStopTask(t); DAQmxClearTask(t); }
+    if (ok) *value = v ? 1 : 0;
+    return ok;
+#else
+    Q_UNUSED(dev); if (err) *err = "NI-DAQmx absent de cette compilation : cochez « Simulation »"; return false;
+#endif
+}
+
+// ----------------------------------------------------------------------------- alimentation EA (SCPI)
+bool EaPsu::open(const QString& port, bool simulate, QString* err)
+{
+    close(); m_port = port.trimmed(); m_sim = simulate;
+    if (m_port.isEmpty()) { if (err) *err = "connexion USB (port COM) non renseignée"; return false; }
+    if (m_sim) { m_open = true; return true; }
+#if defined(_WIN32)
+    const std::wstring path = (QString("\\\\.\\") + m_port).toStdWString();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { if (err) *err = QString("%1 : ouverture impossible (erreur Windows %2)").arg(m_port).arg(GetLastError()); return false; }
+    DCB dcb{}; dcb.DCBlength = sizeof(dcb); GetCommState(h, &dcb);
+    dcb.BaudRate = 115200; dcb.ByteSize = 8; dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;   // port USB virtuel : debit indifferent
+    dcb.fDtrControl = DTR_CONTROL_ENABLE; dcb.fRtsControl = RTS_CONTROL_ENABLE;
+    SetCommState(h, &dcb);
+    COMMTIMEOUTS to{}; to.ReadIntervalTimeout = 50; to.ReadTotalTimeoutConstant = 500; to.WriteTotalTimeoutConstant = 500;
+    SetCommTimeouts(h, &to);
+    m_h = h; m_open = true;
+    QString id; const QString idn = query("*IDN?", &id);
+    if (idn.isEmpty()) { const QString e = id; close(); if (err) *err = QString("%1 : l’alimentation ne répond pas à *IDN? (%2)").arg(m_port, e); return false; }
+    return command("SYST:LOCK ON", err);                  // commande a distance
+#else
+    if (err) *err = "pilotage des alimentations disponible sous Windows uniquement : cochez « Simulation »"; return false;
+#endif
+}
+
+void EaPsu::close()
+{
+    if (!m_open) return;
+#if defined(_WIN32)
+    if (!m_sim && m_h) { QString e; writeLine("SYST:LOCK OFF", &e); CloseHandle(HANDLE(m_h)); }
+#endif
+    m_h = nullptr; m_open = false;
+}
+
+bool EaPsu::writeLine(const QString& s, QString* err)
+{
+#if defined(_WIN32)
+    const QByteArray b = (s + "\n").toLatin1(); DWORD n = 0;
+    if (!WriteFile(HANDLE(m_h), b.constData(), DWORD(b.size()), &n, nullptr) || n != DWORD(b.size())) {
+        if (err) *err = QString("%1 : écriture impossible").arg(m_port); return false; }
+    return true;
+#else
+    Q_UNUSED(s); Q_UNUSED(err); return false;
+#endif
+}
+
+bool EaPsu::readLine(QString* line, QString* err)
+{
+#if defined(_WIN32)
+    QByteArray acc; char c = 0; DWORD n = 0; QElapsedTimer t; t.start();
+    while (t.elapsed() < 1500) {
+        if (!ReadFile(HANDLE(m_h), &c, 1, &n, nullptr)) break;
+        if (n == 0) continue;
+        if (c == '\n') { *line = QString::fromLatin1(acc).trimmed(); return true; }
+        acc += c;
+    }
+    if (err) *err = QString("%1 : pas de réponse").arg(m_port);
+    return false;
+#else
+    Q_UNUSED(line); Q_UNUSED(err); return false;
+#endif
+}
+
+QString EaPsu::query(const QString& scpi, QString* err)
+{
+    if (!m_open) { if (err) *err = "alimentation non connectée"; return QString(); }
+    if (m_sim) return "simulation";
+    QString r; if (!writeLine(scpi, err) || !readLine(&r, err)) return QString();
+    return r;
+}
+
+bool EaPsu::command(const QString& scpi, QString* err)
+{
+    if (!m_open) { if (err) *err = "alimentation non connectée"; return false; }
+    if (m_sim) return true;
+    if (!writeLine(scpi, err)) return false;
+    const QString e = query("SYST:ERR?", err);           // « 0,No error » attendu
+    if (e.isEmpty()) return false;
+    if (!e.startsWith("0")) { if (err) *err = QString("%1 refusé par l’alimentation : %2").arg(scpi, e); return false; }
+    return true;
+}
+
+
+
+#pragma once
+// v58 : execution d'un scenario (etapes l'une apres l'autre, sans bloquer l'interface).
+// Debut : sorties 6528 -> etat « initial ». Fin normale : sorties -> « fin ».
+// Arret / erreur : MLI arretees, sorties DC coupees, sorties 6528 -> « arret ».
+#include <QObject>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QTimer>
+#include <QElapsedTimer>
+#include <QMap>
+#include <QSet>
+#include <functional>
+#include <memory>
+
+class EaPsu;
+
+class ScenarioRunner : public QObject {
+    Q_OBJECT
+public:
+    // action MLI sur un ampli : "demarrer_mli", "pause_mli", "reprendre_mli", "arreter_mli"
+    using MliHook = std::function<bool(int amp, const QString& action, QString* err)>;
+    explicit ScenarioRunner(QObject* parent = nullptr);
+    ~ScenarioRunner() override;
+    void setMliHook(MliHook h) { m_mli = std::move(h); }
+    bool running() const { return m_running; }
+    void run(const QJsonObject& automation, int scenarioIndex, const QString& dev6528, bool simulate);
+    void stop(const QString& why);                       // arret demande par l'utilisateur
+signals:
+    void stepStarted(int index, const QString& text);
+    void logMessage(const QString& level, const QString& message);
+    void finished(bool ok, const QString& message);
+private:
+    void next();
+    void execStep();
+    void stepDone();
+    void fail(const QString& msg);
+    void safeStop();
+    void setAllOutputs(const char* field);
+    EaPsu* psu(const QString& id, QString* err);
+    QJsonObject find(const QString& list, const QJsonValue& id) const;
+    QString stepText(const QJsonObject& st) const;
+
+    MliHook m_mli;
+    QJsonObject m_auto; QJsonArray m_steps; QString m_name, m_dev;
+    bool m_sim = false, m_running = false;
+    int m_k = -1;
+    QTimer m_wait, m_poll;
+    QElapsedTimer m_pollClock; double m_timeoutS = 0; int m_expected = 0; int m_inVoie = 0; bool m_continueOnTimeout = false;
+    QMap<QString, std::shared_ptr<EaPsu>> m_psus;
+    QSet<int> m_amps;                                    // amplis vises par le scenario (arret de securite)
+};
+
+
+
+
+
+
+
+
 // v58 : moteur d'execution des scenarios
 #include "ScenarioRunner.h"
 #include "ScenarioHardware.h"

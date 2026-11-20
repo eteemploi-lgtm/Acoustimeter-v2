@@ -1,0 +1,480 @@
+// v58 : moteur d'execution des scenarios
+#include "ScenarioRunner.h"
+#include "ScenarioHardware.h"
+#include "ScenarioPages.h"
+
+ScenarioRunner::ScenarioRunner(QObject* parent) : QObject(parent)
+{
+    m_wait.setSingleShot(true);
+    connect(&m_wait, &QTimer::timeout, this, &ScenarioRunner::stepDone);
+    m_poll.setInterval(50);
+    connect(&m_poll, &QTimer::timeout, this, [this]() {
+        int v = 0; QString e;
+        if (!Scen6528::read(m_dev, m_inVoie, &v, m_sim, &e)) { m_poll.stop(); fail(e); return; }
+        if (m_sim && m_pollClock.elapsed() > 500) v = m_expected;          // simulation : l'etat attendu arrive apres 0,5 s
+        if (v == m_expected) { m_poll.stop(); emit logMessage("ok", QString("Entrée voie %1 = %2").arg(m_inVoie).arg(v)); stepDone(); return; }
+        if (m_pollClock.elapsed() > m_timeoutS * 1000) {
+            m_poll.stop();
+            if (m_continueOnTimeout) { emit logMessage("warn", QString("Délai dépassé (%1 s) sur l’entrée voie %2 : on continue").arg(m_timeoutS).arg(m_inVoie)); stepDone(); }
+            else fail(QString("délai dépassé (%1 s) : l’entrée voie %2 n’a pas pris l’état %3").arg(m_timeoutS).arg(m_inVoie).arg(m_expected));
+        }
+    });
+}
+
+ScenarioRunner::~ScenarioRunner() { if (m_running) safeStop(); }
+
+QJsonObject ScenarioRunner::find(const QString& list, const QJsonValue& id) const
+{
+    const QString t = ScenarioModel::idText(id);
+    for (const auto& v : m_auto.value(list).toArray()) if (ScenarioModel::idText(v.toObject().value("id")) == t) return v.toObject();
+    return QJsonObject();
+}
+
+QString ScenarioRunner::stepText(const QJsonObject& st) const
+{
+    const int a = ScenarioAction::find(st.value("action").toString());
+    QString t = a >= 0 ? ScenarioAction::all()[a].label : st.value("action").toString();
+    if (a >= 0) {
+        const auto& d = ScenarioAction::all()[a];
+        if (d.target == ScenarioAction::Amp) t += QString(" · Ampli %1").arg(ScenarioModel::idText(st.value("cible")));
+        if (d.target == ScenarioAction::Out) t += " · " + find("sorties", st.value("cible")).value("nom").toString();
+        if (d.target == ScenarioAction::In)  t += " · " + find("entrees", st.value("cible")).value("nom").toString();
+        if (d.target == ScenarioAction::Psu) t += " · " + find("alimentations", st.value("cible")).value("nom").toString();
+        if (d.value != ScenarioAction::NoValue) t += " · " + QString::number(st.value("valeur").toDouble(), 'g', 6);
+    }
+    return t;
+}
+
+void ScenarioRunner::run(const QJsonObject& automation, int idx, const QString& dev6528, bool simulate)
+{
+    if (m_running) return;
+    const QJsonArray sc = automation.value("scenarios").toArray();
+    if (idx < 0 || idx >= sc.size()) { emit finished(false, "aucun scénario sélectionné"); return; }
+    m_auto = automation; m_steps = sc[idx].toObject().value("etapes").toArray(); m_name = sc[idx].toObject().value("nom").toString();
+    m_dev = dev6528.trimmed(); m_sim = simulate; m_k = -1; m_psus.clear(); m_amps.clear();
+    if (m_steps.isEmpty()) { emit finished(false, "le scénario n’a pas d’étape"); return; }
+    if (!m_sim && m_dev.isEmpty()) { emit finished(false, "nom NI MAX du PXIe-6528 non renseigné"); return; }
+    for (const auto& v : m_steps) { const QJsonObject st = v.toObject(); const int a = ScenarioAction::find(st.value("action").toString());
+        if (a >= 0 && ScenarioAction::all()[a].target == ScenarioAction::Amp) m_amps << ScenarioModel::idText(st.value("cible")).toInt(); }
+    m_running = true;
+    emit logMessage("info", QString("Scénario « %1 » : début (%2 étapes)%3").arg(m_name).arg(m_steps.size()).arg(m_sim ? " — SIMULATION, aucun matériel piloté" : ""));
+    setAllOutputs("initial");
+    if (m_running) next();
+}
+
+void ScenarioRunner::next()
+{
+    if (!m_running) return;
+    if (++m_k >= m_steps.size()) {
+        setAllOutputs("fin");
+        for (auto& p : m_psus) p->close();               // rend la main en local ; les sorties DC gardent leur etat
+        m_psus.clear(); m_running = false; m_k = -1;
+        emit logMessage("ok", QString("Scénario « %1 » terminé").arg(m_name));
+        emit finished(true, QString("Scénario « %1 » terminé").arg(m_name));
+        return;
+    }
+    QTimer::singleShot(0, this, &ScenarioRunner::execStep);
+}
+
+void ScenarioRunner::stepDone() { if (m_running) next(); }
+
+EaPsu* ScenarioRunner::psu(const QString& id, QString* err)
+{
+    if (m_psus.contains(id)) return m_psus[id].get();
+    const QJsonObject o = find("alimentations", QJsonValue(id));
+    if (o.isEmpty()) { *err = "alimentation introuvable"; return nullptr; }
+    auto p = std::make_shared<EaPsu>();
+    if (!p->open(o.value("connexion_usb").toString(), m_sim, err)) { *err = o.value("nom").toString() + " : " + *err; return nullptr; }
+    emit logMessage("info", QString("%1 connectée sur %2").arg(o.value("nom").toString(), o.value("connexion_usb").toString()));
+    m_psus[id] = p; return p.get();
+}
+
+void ScenarioRunner::execStep()
+{
+    if (!m_running) return;
+    const QJsonObject st = m_steps[m_k].toObject();
+    const QString text = stepText(st);
+    emit stepStarted(m_k, text);
+    emit logMessage("info", QString("Étape %1 : %2").arg(m_k + 1).arg(text));
+    const int a = ScenarioAction::find(st.value("action").toString());
+    if (a < 0) { fail(QString("action non reconnue « %1 »").arg(st.value("action").toString())); return; }
+    const QString key = ScenarioAction::all()[a].key;
+    const double val = st.value("valeur").toDouble();
+    QString err;
+
+    if (key.endsWith("_mli")) {
+        const int amp = ScenarioModel::idText(st.value("cible")).toInt();
+        if (m_sim) { stepDone(); return; }
+        if (!m_mli) { fail("pilotage des MLI indisponible"); return; }
+        if (!m_mli(amp, key, &err)) { fail(QString("Ampli %1 : %2").arg(amp).arg(err)); return; }
+        stepDone(); return;
+    }
+    if (key == "positionner_sortie_6528") {
+        const QJsonObject o = find("sorties", st.value("cible"));
+        if (o.isEmpty()) { fail("sortie introuvable"); return; }
+        if (!Scen6528::write(m_dev, o.value("voie").toInt(), int(val), m_sim, &err)) { fail(o.value("nom").toString() + " : " + err); return; }
+        stepDone(); return;
+    }
+    if (key == "attendre_entree_6528") {
+        const QJsonObject o = find("entrees", st.value("cible"));
+        if (o.isEmpty()) { fail("entrée introuvable"); return; }
+        m_inVoie = o.value("voie").toInt(); m_expected = int(val);
+        m_timeoutS = st.value("timeout_s").toDouble(10); m_continueOnTimeout = st.value("sur_timeout").toString().startsWith("contin");
+        m_pollClock.start(); m_poll.start(); return;
+    }
+    if (key == "attendre_duree") { m_wait.start(int(std::max(1.0, val * 1000))); return; }
+    // alimentations
+    EaPsu* p = psu(ScenarioModel::idText(st.value("cible")), &err);
+    if (!p) { fail(err); return; }
+    QString cmd;
+    if (key == "regler_tension") cmd = QString("VOLT %1").arg(val, 0, 'f', 2);
+    else if (key == "regler_limite_courant") cmd = QString("CURR %1").arg(val, 0, 'f', 3);
+    else if (key == "regler_limite_puissance") cmd = QString("POW %1").arg(val, 0, 'f', 1);
+    else if (key == "activer_sortie_dc") cmd = "OUTP ON";
+    else if (key == "desactiver_sortie_dc") cmd = "OUTP OFF";
+    if (!p->command(cmd, &err)) { fail(err); return; }
+    stepDone();
+}
+
+void ScenarioRunner::setAllOutputs(const char* field)
+{
+    for (const auto& v : m_auto.value("sorties").toArray()) {
+        const QJsonObject o = v.toObject(); QString e;
+        if (!Scen6528::write(m_dev, o.value("voie").toInt(), o.value(field).toInt(), m_sim, &e)) {
+            emit logMessage("err", QString("Sortie « %1 » → %2 : %3").arg(o.value("nom").toString(), field, e));
+            if (QString(field) == "initial") { fail("mise à l’état initial impossible"); return; }
+        }
+    }
+}
+
+void ScenarioRunner::safeStop()
+{
+    // 1. MLI des amplis du scenario  2. sorties DC de toutes les alimentations  3. sorties 6528 -> etat « arret »
+    QString e;
+    if (!m_sim && m_mli) for (int amp : m_amps) if (!m_mli(amp, "arreter_mli", &e)) emit logMessage("err", QString("Arrêt MLI ampli %1 : %2").arg(amp).arg(e));
+    for (const auto& v : m_auto.value("alimentations").toArray()) {
+        const QString id = ScenarioModel::idText(v.toObject().value("id"));
+        if (EaPsu* p = psu(id, &e)) { if (!p->command("OUTP OFF", &e)) emit logMessage("err", e); }
+        else emit logMessage("err", "Coupure sortie DC : " + e);
+    }
+    for (auto& p : m_psus) p->close();
+    m_psus.clear();
+    for (const auto& v : m_auto.value("sorties").toArray()) {
+        const QJsonObject o = v.toObject();
+        if (!Scen6528::write(m_dev, o.value("voie").toInt(), o.value("arret").toInt(), m_sim, &e)) emit logMessage("err", QString("Sortie « %1 » → arrêt : %2").arg(o.value("nom").toString(), e));
+    }
+}
+
+void ScenarioRunner::fail(const QString& msg)
+{
+    if (!m_running) return;
+    m_wait.stop(); m_poll.stop();
+    emit logMessage("err", QString("Scénario « %1 », étape %2 : %3 — mise en sécurité").arg(m_name).arg(m_k + 1).arg(msg));
+    safeStop();
+    m_running = false; const int k = m_k; m_k = -1;
+    emit finished(false, QString("Étape %1 : %2").arg(k + 1).arg(msg));
+}
+
+void ScenarioRunner::stop(const QString& why)
+{
+    if (!m_running) return;
+    m_wait.stop(); m_poll.stop();
+    emit logMessage("warn", QString("Scénario « %1 » arrêté (%2) — mise en sécurité").arg(m_name, why));
+    safeStop();
+    m_running = false; m_k = -1;
+    emit finished(false, "Scénario arrêté : " + why);
+}
+
+
+
+
+
+B. Fichiers à modifier
+
+5. CMakeLists.txt
+
+Sous src/SpectrogramView.cpp, ajoutez :
+
+    src/ScenarioRunner.cpp
+    src/ScenarioHardware.cpp
+
+Sous include/SpectrogramView.h, ajoutez :
+
+    include/ScenarioRunner.h
+    include/ScenarioHardware.h
+
+6. include/ScenarioPages.h
+
+a) Sous la ligne class QSpinBox;, ajoutez :
+
+class QLineEdit;
+class QPushButton;
+
+b) Dans class ScenarioSeqPage, remplacez :
+
+    void refresh() override { rebuild(); }
+private:
+
+par (seulement dans cette classe, la dernière du fichier) :
+
+    void refresh() override { rebuild(); }
+    class ScenarioRunner* runner() const { return m_runner; }     // v58 : execution
+signals:
+    void logMessage(const QString& level, const QString& message);
+private:
+    void startRun(); void setRunning(bool on);
+    class ScenarioRunner* m_runner = nullptr;
+    QPushButton *m_runBtn = nullptr, *m_stopBtn = nullptr; QLineEdit* m_dev = nullptr; class QCheckBox* m_simu = nullptr;
+    QLabel* m_runState = nullptr; QWidget* m_editArea = nullptr; QList<QWidget*> m_editButtons; int m_runStep = -1;
+
+7. src/ScenarioPages.cpp
+
+a) Includes : sous #include "ScenarioPages.h", ajoutez :
+
+#include "ScenarioRunner.h"
+#include <QCheckBox>
+#include <QGroupBox>
+#include <QSettings>
+#include <QStyle>
+
+b) Boutons ▲ ▼ ✕, dans ScenarioSeqPage::stepRow. Remplacez :
+
+    auto* up = new QPushButton("▲"); auto* dn = new QPushButton("▼"); auto* del = new QPushButton("✕");
+    for (auto* b : {up, dn, del}) b->setFixedWidth(30);
+    del->setStyleSheet("color:#ff6b6b;"); del->setToolTip("Supprimer l’étape"); up->setToolTip("Monter"); dn->setToolTip("Descendre");
+
+par :
+
+    // v58 : icones standard + fond clair (les caracteres ▲ ▼ ✕ etaient peu visibles)
+    auto* up = new QPushButton; auto* dn = new QPushButton; auto* del = new QPushButton;
+    up->setIcon(style()->standardIcon(QStyle::SP_ArrowUp)); dn->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+    del->setIcon(style()->standardIcon(QStyle::SP_DialogCloseButton));
+    const QString bs = "QPushButton{background:#30363d;border:1px solid #8b949e;border-radius:4px;min-width:32px;min-height:30px;}"
+                       "QPushButton:hover{background:#1f6feb;border-color:#58a6ff;}QPushButton:disabled{background:#161b22;border-color:#30363d;}";
+    for (auto* b : {up, dn, del}) { b->setFixedSize(36, 32); b->setIconSize(QSize(18, 18)); b->setStyleSheet(bs); }
+    del->setStyleSheet(bs + "QPushButton:hover{background:#b42318;border-color:#ff7b72;}");
+    del->setToolTip("Supprimer l’étape"); up->setToolTip("Monter l’étape"); dn->setToolTip("Descendre l’étape");
+
+c) Étape en cours en vert, à la fin de stepRow. Remplacez :
+
+        f->setStyleSheet(kRowCss + "QFrame#scRow{border-color:#8a6d1f;}");
+    }
+    return f;
+
+par :
+
+        f->setStyleSheet(kRowCss + "QFrame#scRow{border-color:#8a6d1f;}");
+    }
+    if (index == m_runStep) f->setStyleSheet(kRowCss + "QFrame#scRow{border:2px solid #00e676;background:#12261a;}");   // v58 : etape en cours
+    return f;
+
+d) Dans le constructeur ScenarioSeqPage::ScenarioSeqPage, remplacez :
+
+    auto* bot = new QHBoxLayout;
+    auto* bAdd = new QPushButton("+  Ajouter une étape"); bAdd->setProperty("cssClass", "primary");
+
+par :
+
+    m_editArea = holder;
+    auto* bot = new QHBoxLayout;
+    auto* bAdd = new QPushButton("+  Ajouter une étape"); bAdd->setProperty("cssClass", "primary");
+    m_editButtons = {bNew, bRen, bDup, bDel, bAdd, m_pick};
+
+e) Toujours dans ce constructeur, juste après m_lay->addLayout(bot);, remplacez la ligne m_lay->addStretch(1); qui suit par :
+
+    // v58 : execution du scenario selectionne
+    auto* rg = new QGroupBox("Exécution"); auto* rv = new QVBoxLayout(rg);
+    auto* rl = new QHBoxLayout;
+    m_runBtn = new QPushButton("▶  Lancer le scénario"); m_runBtn->setProperty("cssClass", "primary");
+    m_stopBtn = new QPushButton("■  Arrêter"); m_stopBtn->setEnabled(false);
+    m_stopBtn->setStyleSheet("QPushButton{color:#ff7b72;font-weight:bold;}");
+    m_dev = new QLineEdit(QSettings().value("scenario/dev6528", "PXI1Slot7").toString()); m_dev->setFixedWidth(130);
+    m_dev->setToolTip("Nom du PXIe-6528 dans NI MAX. Entrées : port0 à port2 (voies 0 à 23), sorties : port3 à port5 (voies 0 à 23).");
+    m_simu = new QCheckBox("Simulation (sans matériel)"); m_simu->setChecked(QSettings().value("scenario/simulation", true).toBool());
+    m_simu->setToolTip("Déroule le scénario sans piloter le 6528, les alimentations ni les MLI : pour vérifier l’enchaînement.");
+    rl->addWidget(m_runBtn); rl->addWidget(m_stopBtn); rl->addSpacing(16);
+    rl->addWidget(new QLabel("PXIe-6528 :")); rl->addWidget(m_dev); rl->addWidget(m_simu); rl->addStretch(1);
+    rv->addLayout(rl);
+    m_runState = new QLabel("Prêt."); m_runState->setWordWrap(true); m_runState->setStyleSheet("color:#8b949e;font-size:12px;");
+    rv->addWidget(m_runState);
+    rv->addWidget(Ui::hint("Arrêt ou erreur : arrêt des MLI des amplis du scénario, coupure de la sortie DC de toutes les alimentations, "
+                           "puis sorties 6528 dans leur état « Arrêt / erreur »."));
+    m_lay->addWidget(rg);
+    m_lay->addStretch(1);
+    m_runner = new ScenarioRunner(this);
+    connect(m_runBtn, &QPushButton::clicked, this, &ScenarioSeqPage::startRun);
+    connect(m_stopBtn, &QPushButton::clicked, this, [this]() { m_runner->stop("bouton Arrêter"); });
+    connect(m_dev, &QLineEdit::editingFinished, this, [this]() { QSettings().setValue("scenario/dev6528", m_dev->text().trimmed()); });
+    connect(m_simu, &QCheckBox::toggled, this, [](bool on) { QSettings().setValue("scenario/simulation", on); });
+    connect(m_runner, &ScenarioRunner::logMessage, this, &ScenarioSeqPage::logMessage);
+    connect(m_runner, &ScenarioRunner::stepStarted, this, [this](int k, const QString& t) {
+        m_runStep = k; rebuildSteps();
+        m_runState->setStyleSheet("color:#00e676;font-size:12px;");
+        m_runState->setText(QString("● En cours — étape %1 / %2 : %3").arg(k + 1).arg(steps().size()).arg(t)); });
+    connect(m_runner, &ScenarioRunner::finished, this, [this](bool ok, const QString& msg) {
+        setRunning(false);
+        m_runState->setStyleSheet(ok ? "color:#00e676;font-size:12px;" : "color:#ff7b72;font-size:12px;");
+        m_runState->setText((ok ? "✓ " : "✕ ") + msg); });
+
+f) Deux nouvelles fonctions, à placer juste avant QJsonArray ScenarioSeqPage::steps() const :
+
+void ScenarioSeqPage::setRunning(bool on)
+{
+    m_runBtn->setEnabled(!on); m_stopBtn->setEnabled(on); m_dev->setEnabled(!on); m_simu->setEnabled(!on);
+    for (QWidget* w : m_editButtons) w->setEnabled(!on);
+    m_editArea->setEnabled(!on);
+    if (!on) { m_runStep = -1; rebuildSteps(); }
+}
+
+void ScenarioSeqPage::startRun()
+{
+    const QString e = m->validate();
+    if (!e.isEmpty()) { m_runState->setStyleSheet("color:#ff7b72;font-size:12px;"); m_runState->setText("Lancement impossible : " + e); return; }
+    if (m->list("scenarios").isEmpty()) return;
+    const QString name = m->list("scenarios")[m_cur].toObject().value("nom").toString();
+    if (!m_simu->isChecked() && QMessageBox::question(this, "Lancer le scénario",
+            QString("Lancer « %1 » sur le MATÉRIEL ?\n\nLe 6528 (%2), les alimentations et les MLI vont être pilotés.").arg(name, m_dev->text().trimmed())) != QMessageBox::Yes) return;
+    QSettings().setValue("scenario/dev6528", m_dev->text().trimmed());
+    setRunning(true);
+    m_runner->run(m->json(), m_cur, m_dev->text(), m_simu->isChecked());
+}
+
+8. include/ConfigWindow.h
+
+a) En haut, sous #pragma once, ajoutez :
+
+#include <QSet>
+
+b) Remplacez :
+
+    bool buildAnalogOutputs(QList<AbOutput>* outs, QString* err);
+
+par :
+
+    bool buildAnalogOutputs(QList<AbOutput>* outs, QString* err, const QSet<int>& only = {});   // only : amplis retenus (vide = tous)
+    class ScenarioSeqPage* scenarioPage() const { return m_scenSeq; }   // v58
+
+c) Remplacez :
+
+    bool buildMliLines(QVector<quint32>* words, double* clockHz, QString* err, bool allowNone = false);
+
+par :
+
+    bool buildMliLines(QVector<quint32>* words, double* clockHz, QString* err, bool allowNone = false, const QSet<int>& only = {});
+
+9. src/ConfigWindow.cpp
+
+a) Changez la première ligne de buildMliLines :
+
+bool ConfigWindow::buildMliLines(QVector<quint32>* words, double* clockHz, QString* err, bool allowNone, const QSet<int>& only)
+
+Puis, dans sa boucle, ajoutez une ligne juste après if (m_amps[i].cls && m_amps[i].cls->value() == kClassAB) continue; :
+
+        if (!only.isEmpty() && !only.contains(i + 1)) continue;                   // v58 : amplis choisis par un scenario
+
+b) Changez la première ligne de buildAnalogOutputs :
+
+bool ConfigWindow::buildAnalogOutputs(QList<AbOutput>* outs, QString* err, const QSet<int>& only)
+
+Puis ajoutez une ligne juste après if (!m_amps[i].cls || m_amps[i].cls->value() != kClassAB || !m_amps[i].ana) continue; :
+
+        if (!only.isEmpty() && !only.contains(i + 1)) continue;                   // v58
+
+10. include/MainWindow.h
+
+a) Sous void updateEmitButton();, ajoutez :
+
+    bool startEmissionFor(const QSet<int>& only, QString* err);       // v58
+    bool scenarioMli(int amp, const QString& action, QString* err);   // v58
+
+b) Sous QSet<int> m_supEmitAmps;, ajoutez :
+
+    QSet<int> m_scenAmps;                             // v58 : amplis emis par le scenario en cours
+
+11. src/MainWindow.cpp
+
+a) Includes : sous #include "MainWindow.h", ajoutez :
+
+#include "ScenarioPages.h"
+#include "ScenarioRunner.h"
+
+b) Branchement, juste après la ligne connect(m_configWindow, &ConfigWindow::configChanged, this, &MainWindow::onConfigChanged); :
+
+    if (auto* sp = m_configWindow->scenarioPage()) {      // v58 : execution des scenarios
+        sp->runner()->setMliHook([this](int amp, const QString& action, QString* err) { return scenarioMli(amp, action, err); });
+        connect(sp, &ScenarioSeqPage::logMessage, this, &MainWindow::appendLog);
+    }
+
+c) Remplacez toute la fonction void MainWindow::toggleEmission(), jusqu'à la ligne juste avant void MainWindow::updateEmitButton(), par ces trois fonctions :
+
+void MainWindow::toggleEmission()
+{
+    if (m_hw->emitting() || m_supAbOn || m_supAbPending) {           // arret de tout ce qui a ete lance
+        if (m_hw->emitting()) m_hw->stopEmission();
+        if (m_supAbOn || m_supAbPending) { if (!m_connConfig.offline) m_hw->stopFgen("bouton Arrêter émission"); m_supAbOn = m_supAbPending = false; recEvent("emission_off"); }
+        m_supEmitAmps.clear(); updateEmitButton(); refreshSidebarStatus(); return;
+    }
+    // v50 : tous les amplis configurés -- classe D sur la PXIe-6537 (trames combinées), classe AB sur le PXIe-5413 (ao0 / ao1)
+    QString err;
+    if (!startEmissionFor({}, &err)) appendLog("err", "Émission impossible : " + err);
+}
+
+// v58 : emission d'un ensemble d'amplis (vide = tous) -- utilise par « Démarrer émission » et par les scenarios
+bool MainWindow::startEmissionFor(const QSet<int>& only, QString* errOut)
+{
+    const bool bypass = m_noAmpCheck && m_noAmpCheck->isChecked();
+    QVector<quint32> words; double clk = 0; QString err; QList<ConfigWindow::AbOutput> ab;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const bool okD = m_configWindow->buildMliLines(&words, &clk, &err, true, only);
+    const bool okAB = okD && m_configWindow->buildAnalogOutputs(&ab, &err, only);
+    QApplication::restoreOverrideCursor();
+    if (!okD || !okAB) { *errOut = err; return false; }
+    if (words.isEmpty() && ab.isEmpty()) { *errOut = "aucun ampli configuré (choisissez la classe AB ou D de chaque ampli)."; return false; }
+    if (m_connConfig.offline) { *errOut = "mode hors ligne"; return false; }
+    if (bypass) appendLog("warn", "Émission en mode TEST OSCILLO SANS AMPLI SOUS TENSION : surveillance thermique ignorée");
+    m_supEmitAmps.clear();
+    for (const auto& a : m_cfg.amplifiers) if (only.isEmpty() || only.contains(a.id)) m_supEmitAmps << a.id;
+    QStringList what;
+    if (!words.isEmpty()) {
+        appendLog("info", QString("Émission classe D : %1 échantillons à %2 MHz envoyés à la PXIe-6537").arg(words.size()).arg(clk / 1e6, 0, 'g', 6));
+        m_hw->startLines(words, clk, bypass); noteMli(words, clk); what << "classe D (6537)";
+    }
+    if (ab.size() == 1) {
+        const auto& o = ab.first();
+        appendLog("info", QString("Émission classe AB : ampli %1 sur ao%2 (±%3 V crête, %4)").arg(o.amp).arg(o.channel).arg(o.peak, 0, 'g', 5).arg(o.highZ ? "charge à vide" : "50 Ω"));
+        m_supAbPending = true; m_hw->startFgen(o.x, o.fs, o.channel, o.highZ, o.peak, bypass); what << QString("AB ampli %1 (ao%2)").arg(o.amp).arg(o.channel);
+    } else if (ab.size() == 2) {
+        // deux voies : meme cadence pour la carte -> reechantillonnage lineaire a la cadence la plus haute
+        const ConfigWindow::AbOutput& a0 = ab[0].channel == "0" ? ab[0] : ab[1];
+        const ConfigWindow::AbOutput& a1 = ab[0].channel == "0" ? ab[1] : ab[0];
+        const double fs = std::max(a0.fs, a1.fs);
+        auto rs = [fs](const QVector<float>& x, double f0) {
+            if (std::abs(f0 - fs) < 1e-9 * fs || x.size() < 2) return x;
+            const int m = std::max(2, int(std::lround(x.size() * fs / f0))); QVector<float> y(m);
+            for (int j = 0; j < m; ++j) { const double t = j * f0 / fs; const int n0 = int(x.size()); const int k = std::min(int(t), n0 - 1), k1 = (k + 1) % n0; const double w = t - k; y[j] = float(x[k] * (1 - w) + x[k1] * w); }
+            return y; };
+        appendLog("info", QString("Émission classe AB : ampli %1 sur ao0 et ampli %2 sur ao1, cadence commune %3 Hz").arg(a0.amp).arg(a1.amp).arg(fs, 0, 'g', 7));
+        m_supAbPending = true; m_hw->startFgenDual(rs(a0.x, a0.fs), rs(a1.x, a1.fs), fs, a0.highZ, a1.highZ, a0.peak, a1.peak, bypass);
+        what << QString("AB amplis %1 (ao0) et %2 (ao1)").arg(a0.amp).arg(a1.amp);
+    }
+    recEvent("mli_play", "Démarrer émission : " + what.join(" + "));
+    updateEmitButton();
+    startMeasures();
+    return true;
+}
+
+// v58 : MLI pilotees par un scenario. Les amplis classe D partagent la PXIe-6537 : on reemet l'ensemble des amplis actifs.
+bool MainWindow::scenarioMli(int amp, const QString& action, QString* err)
+{
+    if (action == "demarrer_mli" || action == "reprendre_mli") m_scenAmps << amp; else m_scenAmps.remove(amp);
+    if (m_hw->emitting()) m_hw->stopEmission();
+    if (m_supAbOn || m_supAbPending) { if (!m_connConfig.offline) m_hw->stopFgen("scénario"); m_supAbOn = m_supAbPending = false; }
+    m_supEmitAmps.clear();
+    if (m_scenAmps.isEmpty()) { updateEmitButton(); refreshSidebarStatus(); appendLog("info", QString("Scénario : MLI ampli %1 — %2").arg(amp).arg(action)); return true; }
+    const bool ok = startEmissionFor(m_scenAmps, err);
+    if (ok) appendLog("info", QString("Scénario : MLI ampli %1 — %2 (amplis émis : %3)").arg(amp).arg(action)
+                                  .arg([this]() { QStringList l; for (int a : m_scenAmps) l << QString::number(a); return l.join(", "); }()));
+    return ok;
+}
+
+Après ces chan

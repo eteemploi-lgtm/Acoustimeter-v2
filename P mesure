@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Ouvre, affiche et exploite un .bin de la fenêtre Mesure d'Acoustimeter (format ACMB).
+
+En ligne de commande
+    python acoustimeter_mesure.py                       # choisir le fichier dans une fenêtre
+    python acoustimeter_mesure.py mesure.bin            # résumé + courbes
+    python acoustimeter_mesure.py mesure.bin --y G_S B_S --export csv
+    python acoustimeter_mesure.py mesure.bin --pas-de-trace --png courbes.png
+
+Dans un script / Jupyter
+    from acoustimeter_mesure import lire
+    m = lire("mesure.bin")
+    m.resume()
+    f, tvr = m.col("f"), m.col("TVR")          # une colonne par le début de son nom (NaN = non mesuré)
+    m.trace()                                  # courbes standard ;  m.trace(y=["G_S", "B_S"])
+    m.export_csv("mesure.csv");  df = m.dataframe()   # pandas, si installé
+
+Un fichier d'enregistrement (ACOUSBIN) est transmis à acoustimeter_enregistrement.
+Dépendances : numpy, matplotlib (pandas et scipy facultatifs).
+"""
+import argparse
+import os
+import re
+import struct
+import sys
+
+import numpy as np
+
+
+class Mesure:
+    """Contenu d'un fichier ACMB.
+
+    fichier, entete (dict texte), colonnes (liste), donnees (tableau points × colonnes),
+    remarques (liste de (numéro de point à partir de 1, texte)), c (dict colonne -> vecteur).
+    """
+
+    def __init__(self, fichier, entete, colonnes, donnees):
+        self.fichier, self.entete, self.colonnes, self.donnees = fichier, entete, colonnes, donnees
+        self.c = {n: donnees[:, k] for k, n in enumerate(colonnes)}
+        self.remarques = sorted((int(m.group(1)) + 1, v) for k, v in entete.items()
+                                if (m := re.fullmatch(r"remarque_(\d+)", k)))
+
+    @property
+    def n_points(self):
+        return self.donnees.shape[0]
+
+    def indice(self, nom):
+        """Indice d'une colonne : nom exact, sinon début du nom (majuscules indifférentes)."""
+        if nom in self.colonnes:
+            return self.colonnes.index(nom)
+        for k, n in enumerate(self.colonnes):
+            if n.lower().startswith(nom.lower()):
+                return k
+        raise KeyError(f"Colonne « {nom} » absente. Colonnes : {', '.join(self.colonnes)}")
+
+    def col(self, nom):
+        return self.donnees[:, self.indice(nom)]
+
+    def __getitem__(self, nom):
+        return self.col(nom)
+
+    # ------------------------------------------------------------------ affichage
+    def resume(self):
+        e = self.entete.get
+        print(f"\n=== Mesure Acoustimeter : {self.fichier}")
+        print(f"  Type        : {e('mesure', '—')}")
+        print(f"  Date        : {e('date', '—')}   {'(SIMULATION)' if e('simulation') == '1' else ''}")
+        print(f"  Ampli       : {e('ampli', '—')}   classe {e('classe', '—')}")
+        print(f"  Hydrophone  : {e('hydrophone', '—')}   distance {e('distance_m', '—')} m   gain préampli {e('gain_preampli_dB', '—')} dB")
+        print(f"  Points      : {self.n_points}     Colonnes : {len(self.colonnes)}")
+        if "Lp_max_global_dB_re_1uPa" in self.entete:
+            print(f"  Lp max global : {self.entete['Lp_max_global_dB_re_1uPa']} dB re 1 µPa")
+        print(f"  {'colonne':34s} {'mesures':>8s} {'min':>14s} {'max':>14s}")
+        for k, n in enumerate(self.colonnes):
+            x = self.donnees[:, k]; ok = ~np.isnan(x)
+            if ok.any():
+                print(f"  {n:34s} {ok.sum():8d} {x[ok].min():14.6g} {x[ok].max():14.6g}")
+            else:
+                print(f"  {n:34s} {'—':>8s}")
+        for p, t in self.remarques[:5]:
+            print(f"  Remarque point {p} : {t}")
+        if len(self.remarques) > 5:
+            print(f"  ... {len(self.remarques)} remarques au total : voir .remarques")
+        print()
+
+    def axe_x(self, x=None):
+        """Colonne horizontale : choisie, sinon selon le type de mesure, sinon la première qui varie."""
+        if x:
+            return self.colonnes[self.indice(x)]
+        t = self.entete.get("mesure", "").lower()
+        xn = "angle_deg" if "directiv" in t else "Irms_A" if "u=f(i)" in t else "Urms_V" if "lin" in t else "f_Hz"
+        def varie(n):
+            return n in self.c and len(np.unique(self.c[n][~np.isnan(self.c[n])])) > 1
+        if not varie(xn):
+            xn = next((n for n in ("f_Hz", "angle_deg", "Urms_V", "niveau_5413_V_crete", "temps_s") if varie(n)), xn)
+        return xn
+
+    def trace(self, x=None, y=None, png=None, montrer=True):
+        """Courbes standard (un panneau par famille), ou les colonnes y demandées."""
+        import matplotlib.pyplot as plt
+        LIB = {"f_Hz": "Fréquence (Hz)", "angle_deg": "Angle (°)", "Urms_V": "U eff (V)", "Irms_A": "I eff (A)",
+               "temps_s": "Temps (s)", "niveau_5413_V_crete": "Niveau 5413 (V crête / %)"}
+        xn = self.axe_x(x); xv = self.c[xn]; o = np.argsort(xv); xv = xv[o]
+        nom = os.path.splitext(os.path.basename(self.fichier))[0]
+        titre = f"{nom} — {self.entete.get('mesure', '')}"
+        logx = xn == "f_Hz" and np.nanmin(xv) > 0 and np.nanmax(xv) / np.nanmin(xv) > 20
+
+        if y:
+            fig, ax = plt.subplots(figsize=(10, 5.5), num=titre)
+            for n in y:
+                k = self.indice(n); ax.plot(xv, self.donnees[o, k], ".-", label=self.colonnes[k])
+            ax.set_xlabel(LIB.get(xn, xn)); ax.grid(True, alpha=.4); ax.legend(); ax.set_title(titre)
+            if logx: ax.set_xscale("log")
+        else:
+            P = [("TVR / TCR (dB)", ["TVR_dB_re_1uPa_m_per_V", "TCR_dB_re_1uPa_m_per_A"], 1),
+                 ("SL, SLmax, Lpmax (dB)", ["SL_dB_re_1uPa_m", "SLmax_dB_re_1uPa_m", "Lpmax_Umax_dB_re_1uPa"], 1),
+                 ("TPR (dB)", ["TPR_dB_re_1uPa_m_per_sqrtW"], 1),
+                 ("Admittance (mS)", ["G_S", "B_S", "Y_S"], 1e3),
+                 ("Impédance (Ω)", ["Z_ohm"], 1),
+                 ("U eff (V)", ["Urms_V"], 1), ("I eff (A)", ["Irms_A"], 1),
+                 ("P (W), Q (var), S (VA)", ["P_W", "Q_var", "S_VA"], 1),
+                 ("Distorsion THD (%)", ["THDF_U_pct", "THDF_I_pct", "THDF_hydro_pct"], 1),
+                 ("Directivité (dB)", ["directivite_dB"], 1),
+                 ("Températures (°C)", [n for n in self.colonnes if re.fullmatch(r"T_.*_C", n)], 1)]
+            def utile(n):
+                return n != xn and n in self.c and (~np.isnan(self.c[n])).any()
+            P = [(t, [n for n in cs if utile(n)], f) for t, cs, f in P]
+            P = [p for p in P if p[1]]
+            if not P:
+                print("Aucune colonne standard à tracer : utilisez y=[...]"); return
+            nc = min(3, len(P)); nl = -(-len(P) // nc)
+            fig, axs = plt.subplots(nl, nc, figsize=(15, 3.6 * nl), num=titre, squeeze=False)
+            for a in axs.flat[len(P):]:
+                a.set_visible(False)
+            for a, (t, cs, f) in zip(axs.flat, P):
+                for n in cs:
+                    a.plot(xv, self.c[n][o] * f, ".-", ms=3, label=n)
+                a.set_title(t); a.set_xlabel(LIB.get(xn, xn)); a.grid(True, alpha=.4)
+                if len(cs) > 1: a.legend(fontsize=7)
+                if logx: a.set_xscale("log")
+            fig.suptitle(titre, fontweight="bold")
+            fig.tight_layout()
+            if xn == "angle_deg" and "directivite_dB" in self.c and (~np.isnan(self.c["directivite_dB"])).any():
+                d = np.maximum(self.c["directivite_dB"][o], -40)
+                f2 = plt.figure(figsize=(6, 6), num=f"{nom} — directivité"); ap = f2.add_subplot(projection="polar")
+                ap.plot(np.radians(np.r_[xv, xv[0]]), np.r_[d, d[0]]); ap.set_ylim(-40, 0)
+                ap.set_theta_zero_location("N"); ap.set_title("Directivité (dB)")
+        if png:
+            fig.savefig(png, dpi=120, bbox_inches="tight"); print(f"Figure écrite : {png}")
+        if montrer:
+            plt.show()
+
+    # ------------------------------------------------------------------ export
+    def export_csv(self, chemin, sep=";", virgule=True):
+        """CSV (par défaut ';' et virgule décimale, pour Excel en français). NaN -> case vide."""
+        with open(chemin, "w", encoding="utf-8-sig", newline="") as f:
+            f.write(sep.join(self.colonnes) + "\n")
+            for ligne in self.donnees:
+                v = ["" if np.isnan(x) else f"{x:.10g}" for x in ligne]
+                s = sep.join(v)
+                f.write((s.replace(".", ",") if virgule else s) + "\n")
+        print(f"CSV écrit : {chemin}")
+
+    def export_mat(self, chemin):
+        from scipy.io import savemat
+        savemat(chemin, {"colonnes": np.array(self.colonnes, dtype=object), "donnees": self.donnees,
+                         "entete": {re.sub(r"\W", "_", k): v for k, v in self.entete.items()}})
+        print(f"MAT écrit : {chemin}")
+
+    def dataframe(self):
+        import pandas as pd
+        return pd.DataFrame(self.donnees, columns=self.colonnes)
+
+
+def lire(chemin):
+    """Lit un fichier ACMB et renvoie un objet Mesure (un ACOUSBIN est lu par acoustimeter_enregistrement)."""
+    with open(chemin, "rb") as f:
+        b = f.read()
+    if b[:8] == b"ACOUSBIN":
+        print(f"{chemin} est un enregistrement (ACOUSBIN) : lecture avec acoustimeter_enregistrement.")
+        import acoustimeter_enregistrement
+        return acoustimeter_enregistrement.lire(chemin)
+    if b[:4] != b"ACMB":
+        raise ValueError(f"{chemin} n'est pas un fichier de mesure Acoustimeter (signature ACMB absente)")
+    version, ncol, npts, lent = struct.unpack_from("<4I", b, 4)
+    if version != 1:
+        raise ValueError(f"version ACMB {version} non prise en charge")
+    texte = b[20:20 + lent].decode("utf-8")
+    entete = {}
+    for ligne in texte.splitlines():
+        if "=" in ligne:
+            k, v = ligne.split("=", 1); entete[k] = v
+    attendu = 8 * ncol * npts
+    brut = b[20 + lent:20 + lent + attendu]
+    if len(brut) < attendu:
+        print(f"Attention : fichier tronqué ({len(brut) // (8 * ncol)} points lus sur {npts})")
+        brut = brut[:len(brut) // (8 * ncol) * 8 * ncol]
+    donnees = np.frombuffer(brut, dtype="<f8").reshape(-1, ncol).copy()
+    colonnes = entete["colonnes"].split(",") if "colonnes" in entete else [f"col{k}" for k in range(ncol)]
+    return Mesure(chemin, entete, colonnes, donnees)
+
+
+def _choisir_fichier():
+    import tkinter as tk
+    from tkinter import filedialog
+    tk.Tk().withdraw()
+    return filedialog.askopenfilename(title="Choisir une mesure Acoustimeter", filetypes=[("Fichiers .bin", "*.bin")])
+
+
+def main():
+    p = argparse.ArgumentParser(description="Mesure Acoustimeter (.bin ACMB) : résumé, courbes, export.")
+    p.add_argument("fichier", nargs="?", help="fichier .bin (absent : fenêtre de choix)")
+    p.add_argument("--x", help="colonne horizontale (défaut automatique)")
+    p.add_argument("--y", nargs="+", help="colonnes à tracer (début du nom suffit)")
+    p.add_argument("--export", nargs="+", choices=["csv", "mat"], default=[], help="écrit à côté du .bin")
+    p.add_argument("--png", help="enregistre la figure dans ce fichier")
+    p.add_argument("--pas-de-trace", action="store_true", help="ne pas ouvrir de fenêtre de courbes")
+    a = p.parse_args()
+    chemin = a.fichier or _choisir_fichier()
+    if not chemin:
+        return
+    m = lire(chemin)
+    if not isinstance(m, Mesure):
+        m.resume()
+        if not a.pas_de_trace or a.png: m.trace(png=a.png, montrer=not a.pas_de_trace)
+        return
+    m.resume()
+    base = os.path.splitext(chemin)[0]
+    if "csv" in a.export: m.export_csv(base + ".csv")
+    if "mat" in a.export: m.export_mat(base + ".mat")
+    if not a.pas_de_trace or a.png:
+        if a.pas_de_trace:
+            import matplotlib; matplotlib.use("Agg")
+        m.trace(x=a.x, y=a.y, png=a.png, montrer=not a.pas_de_trace)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

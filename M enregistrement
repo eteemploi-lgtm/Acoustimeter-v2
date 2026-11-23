@@ -1,0 +1,284 @@
+function R = acoustimeter_enregistrement(chemin, varargin)
+% ACOUSTIMETER_ENREGISTREMENT  Ouvre, affiche et exploite un enregistrement .bin d'Acoustimeter (format ACOUSBIN) :
+%   Supervision (SAVE-MANU / SAVE-TRIG) ou trames MLI enregistrees depuis Configuration › Ampli › MLI.
+%
+%   R = acoustimeter_enregistrement                       % choisir le fichier dans une fenetre
+%   R = acoustimeter_enregistrement('enregistrement.bin') % lire + resume + courbes
+%   R = acoustimeter_enregistrement('fichier.bin', option, valeur, ...)
+%
+% Options
+%   'trace'    true/false          tracer (defaut true)
+%   'voies'    {'Hydro 1','T eau'} ou [1 3]   voies a tracer/exporter (debut du nom suffit ; defaut : toutes)
+%   'debut'    s   'fin'  s        fenetre de temps (defaut : tout l'enregistrement)
+%   'pont'     {'MLI1','MLI2'}     MLI : reconstruit le pont complet A - B (haut bras A, haut bras B)
+%   'fs_pont'  Hz                  cadence apres filtrage du pont (defaut 200000)
+%   'ecouter'  'Hydro 1' | 'pont'  joue une voie (ou le pont) sur la carte son
+%   'export'   'csv' | 'wav' | 'mat' | {...}   ecrit a cote du .bin (un CSV / WAV par voie choisie)
+%   'resume'   true/false          resume dans la fenetre de commande (defaut true)
+%
+% Resultat R (structure)
+%   R.fichier, R.titre, R.debut, R.meta, R.evenements (t, type, detail)
+%   R.voies(k) : nom, groupe, unite, fs, t0, dtype, valeurs, temps        (temps = t0 + (0:n-1)/fs)
+%   R.voie('Hydro 1')   la structure d'une voie par son nom (debut du nom suffit)
+%   R.pont              si 'pont' : signal, fs, temps
+%
+% Exemples
+%   R = acoustimeter_enregistrement('enregistrement.bin');
+%   h = R.voie('Hydro 1');  plot(h.temps, h.valeurs)
+%   acoustimeter_enregistrement('enr.bin', 'voies', {'Hydro'}, 'debut', 10, 'fin', 10.05)
+%   acoustimeter_enregistrement('trames_MLI.bin', 'pont', {'MLI1','MLI3'}, 'export', 'wav')
+%
+% Un fichier de mesure (ACMB) donne a cette fonction est passe a acoustimeter_mesure.
+% Compatible MATLAB R2016b+ et GNU Octave 7+.
+
+if nargin < 1 || isempty(chemin)
+    [n, d] = uigetfile({'*.bin', 'Fichiers .bin Acoustimeter'}, 'Choisir un enregistrement Acoustimeter');
+    if isequal(n, 0), R = []; return; end
+    chemin = fullfile(d, n);
+end
+o = struct('trace', true, 'voies', {{}}, 'debut', -Inf, 'fin', Inf, 'pont', {{}}, 'fs_pont', 2e5, ...
+           'ecouter', '', 'export', {{}}, 'resume', true);
+for k = 1:2:numel(varargin), o.(lower(varargin{k})) = varargin{k + 1}; end
+if ischar(o.voies), o.voies = {o.voies}; end
+if ischar(o.export), o.export = {o.export}; end
+
+% ---------------------------------------------------------------- lecture
+f = fopen(chemin, 'r', 'ieee-le');
+if f < 0, error('Ouverture impossible : %s', chemin); end
+sig = char(fread(f, 8, 'uint8=>char')');
+if numel(sig) >= 4 && strcmp(sig(1:4), 'ACMB')
+    fclose(f);
+    fprintf('%s est une mesure (ACMB) : ouverture avec acoustimeter_mesure.\n', chemin);
+    R = acoustimeter_mesure(chemin); return;
+end
+if ~strcmp(sig, 'ACOUSBIN'), fclose(f); error('%s n''est pas un enregistrement Acoustimeter (signature ACOUSBIN absente).', chemin); end
+v = fread(f, 2, 'uint32');                         % version, taille de l'en-tete (65536)
+if v(1) ~= 1, fclose(f); error('Version ACOUSBIN %d non prise en charge.', v(1)); end
+js = strtrim(native2unicode(fread(f, v(2) - 16, 'uint8=>uint8')', 'UTF-8'));
+js = js(js ~= 0);
+E = jsondecode(js);
+dv = {}; if isfield(E, 'voies') && ~isempty(E.voies), dv = E.voies; if ~iscell(dv), dv = num2cell(dv); end, end
+nv = numel(dv);
+if nv == 0
+    warning(['En-tete sans voie : l''enregistrement n''a pas ete ferme normalement (arret brutal d''Acoustimeter). ' ...
+             'Les donnees sont dans le fichier mais ne peuvent pas etre attribuees a une voie.']);
+end
+morceaux = cell(nv, 1); for k = 1:nv, morceaux{k} = {}; end
+while true
+    b = fread(f, 2, 'uint32');
+    if numel(b) < 2 || b(1) + 1 > nv, break; end
+    i = b(1) + 1;
+    if strcmp(dv{i}.dtype, 'u8'), x = fread(f, b(2), 'uint8=>uint8'); else, x = fread(f, b(2), 'single=>single'); end
+    morceaux{i}{end + 1} = x;
+    if numel(x) < b(2), warning('Fichier tronque : dernier bloc incomplet.'); break; end
+end
+fclose(f);
+
+voies = struct('nom', {}, 'groupe', {}, 'unite', {}, 'fs', {}, 't0', {}, 'dtype', {}, 'valeurs', {}, 'temps', {});
+for k = 1:nv
+    x = vertcat(morceaux{k}{:}); if isempty(x), x = zeros(0, 1, 'single'); end
+    d = dv{k};
+    voies(k).nom = d.nom; voies(k).groupe = d.groupe; voies(k).unite = d.unite;
+    voies(k).fs = d.fs; voies(k).t0 = d.t0; voies(k).dtype = d.dtype; voies(k).valeurs = x;
+    voies(k).temps = d.t0 + (0:numel(x) - 1)' / d.fs;
+end
+
+R = struct('fichier', chemin, 'titre', lit(E, 'titre', ''), 'debut', lit(E, 'debut', ''), 'meta', lit(E, 'meta', struct()));
+ev = lit(E, 'evenements', []);
+if iscell(ev), ev = [ev{:}]; end
+R.evenements = ev; R.voies = voies;
+R.voie = @(nom) voies(trouve(voies, nom));
+R.pont = [];
+
+% ---------------------------------------------------------------- selection
+sel = 1:nv;
+if ~isempty(o.voies)
+    if isnumeric(o.voies), sel = o.voies(:)';
+    else, sel = []; for k = 1:numel(o.voies), sel = [sel trouve_tous(voies, o.voies{k})]; end, sel = unique(sel, 'stable'); end %#ok<AGROW>
+end
+
+% ---------------------------------------------------------------- pont complet MLI
+if ~isempty(o.pont)
+    a = voies(trouve(voies, o.pont{1})); b = voies(trouve(voies, o.pont{2}));
+    n = min(numel(a.valeurs), numel(b.valeurs));
+    s = double(a.valeurs(1:n)) - double(b.valeurs(1:n));      % -1 / 0 / +1
+    k = max(1, round(a.fs / o.fs_pont)); m = floor(n / k);
+    s = mean(reshape(s(1:m * k), k, m), 1)';                   % moyenne glissante par paquets = filtre passe-bas simple
+    R.pont = struct('signal', s, 'fs', a.fs / k, 'temps', a.t0 + ((0:m - 1)' + 0.5) * k / a.fs, ...
+                    'description', sprintf('%s - %s, moyenne sur %d echantillons', a.nom, b.nom, k));
+end
+
+% ---------------------------------------------------------------- resume
+if o.resume, resume(R); end
+
+% ---------------------------------------------------------------- export
+[dd, nn] = fileparts(chemin); base = fullfile(dd, nn);
+for e = 1:numel(o.export)
+    for k = sel
+        w = fenetre(voies(k), o); nomf = sprintf('%s_%s', base, propre(voies(k).nom));
+        switch lower(o.export{e})
+            case 'csv'
+                fid = fopen([nomf '.csv'], 'w', 'n', 'UTF-8');
+                fprintf(fid, 'temps_s;%s_%s\n', propre(voies(k).nom), propre(voies(k).unite));
+                fprintf(fid, '%s\n', strrep(sprintf('%.9g;%.7g\n', [w.temps double(w.valeurs)]'), '.', ','));
+                fclose(fid); fprintf('CSV ecrit : %s.csv\n', nomf);
+            case 'wav'
+                if strcmp(voies(k).dtype, 'u8')
+                    fprintf('WAV ignore pour %s : trame 0/1 (utilisez ''pont'' pour obtenir un signal ecoutable)\n', voies(k).nom);
+                else
+                    ecrit_wav([nomf '.wav'], double(w.valeurs), w.fs);
+                end
+            case 'mat'
+            otherwise, warning('Export inconnu : %s', o.export{e});
+        end
+    end
+    if strcmpi(o.export{e}, 'wav') && ~isempty(R.pont), ecrit_wav([base '_pont.wav'], R.pont.signal, R.pont.fs); end
+    if strcmpi(o.export{e}, 'mat')
+        enregistrement = rmfield(R, 'voie'); %#ok<NASGU>
+        save([base '.mat'], 'enregistrement'); fprintf('MAT ecrit : %s.mat  (variable « enregistrement »)\n', base);
+    end
+end
+
+% ---------------------------------------------------------------- ecoute
+if ~isempty(o.ecouter)
+    if strcmpi(o.ecouter, 'pont')
+        if isempty(R.pont), error('Option ''ecouter'',''pont'' : donnez aussi ''pont'', {haut_A, haut_B}.'); end
+        x = R.pont.signal; fs = R.pont.fs;
+    else
+        w = fenetre(voies(trouve(voies, o.ecouter)), o); x = double(w.valeurs); fs = w.fs;
+    end
+    x = x - mean(x); x = x / max(abs(x) + eps);
+    if fs < 1000 || fs > 192000, warning('Cadence %g Hz non jouable par la carte son : exportez en WAV.', fs);
+    else, fprintf('Lecture : %.1f s a %g Hz\n', numel(x) / fs, fs); sound(x, fs); end
+end
+
+% ---------------------------------------------------------------- courbes
+if o.trace && ~isempty(sel), trace(R, voies(sel), o); end
+end
+
+% =====================================================================================================
+function v = lit(s, c, def)
+if isfield(s, c), v = s.(c); else, v = def; end
+end
+
+function k = trouve(voies, nom)
+noms = {voies.nom};
+k = find(strcmp(noms, nom), 1);
+if isempty(k), k = find(strncmpi(noms, nom, numel(nom)), 1); end
+if isempty(k), k = find(~cellfun(@isempty, strfind(lower(noms), lower(nom))), 1); end   % ex. 'MLI1' dans « A1 Bras A — haut (MLI1) »
+if isempty(k), error('Voie « %s » absente. Voies : %s', nom, strjoin(noms, ', ')); end
+end
+
+function k = trouve_tous(voies, nom)
+noms = {voies.nom};
+k = find(strncmpi(noms, nom, numel(nom)));
+if isempty(k), k = trouve(voies, nom); end
+end
+
+function s = propre(s)
+s = regexprep(s, '[^A-Za-z0-9]+', '_'); s = regexprep(s, '^_|_$', '');
+end
+
+function w = fenetre(v, o)
+w = v;
+if isinf(o.debut) && isinf(o.fin), return; end
+i = v.temps >= o.debut & v.temps <= o.fin;
+w.valeurs = v.valeurs(i); w.temps = v.temps(i);
+if ~isempty(w.temps), w.t0 = w.temps(1); end
+end
+
+function ecrit_wav(nom, x, fs)
+if isempty(x), return; end
+x = x(:) - mean(x); x = x / max(abs(x) + eps) * 0.99;          % WAV : valeurs ramenees entre -1 et 1 (le niveau absolu est dans le CSV)
+audiowrite(nom, x, round(fs), 'BitsPerSample', 32);
+fprintf('WAV ecrit : %s  (%g Hz, normalise)\n', nom, round(fs));
+end
+
+function resume(R)
+fprintf('\n=== Enregistrement Acoustimeter : %s\n', R.fichier);
+fprintf('  Titre : %s     Debut : %s     Voies : %d     Evenements : %d\n', R.titre, R.debut, numel(R.voies), numel(R.evenements));
+fprintf('  %-32s %-15s %-6s %12s %10s %12s %10s\n', 'voie', 'groupe', 'unite', 'fs (Hz)', 't0 (s)', 'echantillons', 'duree (s)');
+for k = 1:numel(R.voies)
+    v = R.voies(k);
+    fprintf('  %-32s %-15s %-6s %12g %10.4g %12d %10.4g\n', v.nom, v.groupe, v.unite, v.fs, v.t0, numel(v.valeurs), numel(v.valeurs) / v.fs);
+end
+for k = 1:numel(R.evenements)
+    e = R.evenements(k); fprintf('  t = %8.3f s  %-16s %s\n', e.t, e.type, lit(e, 'detail', ''));
+end
+m = R.meta;
+if isstruct(m) && ~isempty(fieldnames(m))
+    c = fieldnames(m); fprintf('  meta :');
+    for k = 1:numel(c)
+        x = m.(c{k});
+        if ischar(x), fprintf(' %s=%s;', c{k}, x); elseif isnumeric(x) && isscalar(x), fprintf(' %s=%g;', c{k}, x); else, fprintf(' %s=[...];', c{k}); end
+    end
+    fprintf('\n');
+end
+if ~isempty(R.pont), fprintf('  Pont complet : %s -> %g Hz, %d points\n', R.pont.description, R.pont.fs, numel(R.pont.signal)); end
+fprintf('\n');
+end
+
+function [t, y] = enveloppe(t, y, nmax)
+% reduit l'affichage a ~nmax points en gardant le min et le max de chaque paquet (les pics restent visibles)
+n = numel(y);
+if n <= nmax, return; end
+k = ceil(2 * n / nmax); m = floor(n / k);
+Y = reshape(double(y(1:m * k)), k, m); T = reshape(t(1:m * k), k, m);
+y = reshape([min(Y, [], 1); max(Y, [], 1)], [], 1);
+t = reshape([T(1, :); T(end, :)], [], 1);
+end
+
+function trace(R, V, o)
+[~, nom] = fileparts(R.fichier);
+groupes = unique({V.groupe}, 'stable');
+np = numel(groupes) + ~isempty(R.pont);
+figure('Name', sprintf('%s — %s', nom, R.titre), 'NumberTitle', 'off', 'Position', [40 60 1200 min(900, 220 * np + 80)]);
+ax = zeros(np, 1);
+for g = 1:numel(groupes)
+    ax(g) = subplot(np, 1, g); hold on; grid on;
+    W = V(strcmp({V.groupe}, groupes{g}));
+    leg = {};
+    if strcmp(groupes{g}, 'MLI')                                 % trames 0/1 decalees les unes au-dessus des autres
+        nmax = 5000; tronque = false;
+        for k = 1:numel(W)
+            w = fenetre(W(k), o);
+            if numel(w.valeurs) > nmax, w.valeurs = w.valeurs(1:nmax); w.temps = w.temps(1:nmax); tronque = true; end
+            if isempty(w.valeurs), continue; end
+            stairs(w.temps, double(w.valeurs) * 0.8 + 1.2 * (k - 1));
+        end
+        set(gca, 'YTick', 1.2 * (0:numel(W) - 1) + 0.4, 'YTickLabel', strrep({W.nom}, '_', '\_')); ylim([-0.3, 1.2 * numel(W)]);
+        t = 'MLI (trames 0/1)'; if tronque, t = sprintf('%s — %d premiers échantillons (options ''debut'', ''fin'' pour zoomer)', t, nmax); end
+        title(t);
+    else
+        for k = 1:numel(W)
+            w = fenetre(W(k), o); if isempty(w.valeurs), continue; end
+            [t, y] = enveloppe(w.temps, w.valeurs, 40000);
+            plot(t, y); leg{end + 1} = strrep(W(k).nom, '_', '\_'); %#ok<AGROW>
+        end
+        u = unique({W.unite}); title(sprintf('%s (%s)', groupes{g}, strjoin(u, ', ')));
+        if numel(leg) > 1, legend(leg, 'Location', 'best', 'FontSize', 7); end
+    end
+    evenements(R, o);
+end
+if ~isempty(R.pont)
+    ax(np) = subplot(np, 1, np); grid on; hold on;
+    p = R.pont; i = p.temps >= o.debut & p.temps <= o.fin;
+    plot(p.temps(i), p.signal(i)); title(['Pont complet : ' strrep(p.description, '_', '\_')]); ylim([-1.1 1.1]);
+end
+xlabel(sprintf('Temps (s) depuis le début de l''enregistrement — %s', R.debut));
+if np > 1
+    try, linkaxes(ax, 'x'); catch, end                          %#ok<NOCOM>
+end
+end
+
+function evenements(R, o)
+if isempty(R.evenements), return; end
+yl = ylim;
+for k = 1:numel(R.evenements)
+    e = R.evenements(k);
+    if e.t < o.debut || e.t > o.fin, continue; end
+    line([e.t e.t], yl, 'Color', [0.6 0.6 0.6], 'LineStyle', '--');
+    text(e.t, yl(2), [' ' strrep(e.type, '_', '\_')], 'FontSize', 7, 'Color', [0.4 0.4 0.4], 'VerticalAlignment', 'top');
+end
+ylim(yl);
+end

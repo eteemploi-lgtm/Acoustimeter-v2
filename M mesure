@@ -1,0 +1,247 @@
+function M = acoustimeter_mesure(chemin, varargin)
+% ACOUSTIMETER_MESURE  Ouvre, affiche et exploite un .bin de la fenetre Mesure d'Acoustimeter (format ACMB).
+%
+%   M = acoustimeter_mesure                  % choisir le fichier dans une fenetre
+%   M = acoustimeter_mesure('mesure.bin')    % lire + resume + courbes
+%   M = acoustimeter_mesure('mesure.bin', option, valeur, ...)
+%
+% Options
+%   'trace'   true/false     tracer les courbes (defaut true)
+%   'x'       nom de colonne axe horizontal (defaut : automatique f_Hz / angle_deg / Urms_V / Irms_A)
+%   'y'       {'TVR','Z'}    tracer seulement ces colonnes (debut du nom suffit, majuscules indifferentes)
+%   'export'  'csv' | 'mat' | {'csv','mat'}   ecrire a cote du .bin (meme nom)
+%   'resume'  true/false     afficher le resume dans la fenetre de commande (defaut true)
+%
+% Resultat M (structure)
+%   M.fichier, M.entete (struct : mesure, date, ampli, hydrophone, distance_m...), M.colonnes (noms),
+%   M.donnees (matrice points x colonnes, NaN = non mesure), M.n_points
+%   M.c.<colonne>      vecteur d'une colonne,  ex. M.c.TVR_dB_re_1uPa_m_per_V
+%   M.col('TVR')       idem par debut de nom,  ex. plot(M.col('f'), M.col('TVR'))
+%   M.remarques        cellule {indice_point, texte}
+%
+% Exemples
+%   M = acoustimeter_mesure('mesure.bin');
+%   [tvr_max, i] = max(M.col('TVR'));  f0 = M.c.f_Hz(i)
+%   acoustimeter_mesure('mesure.bin', 'y', {'G_S','B_S'})        % admittance seulement
+%   acoustimeter_mesure('mesure.bin', 'trace', false, 'export', 'csv')
+%
+% Un fichier d'enregistrement (ACOUSBIN) donne a cette fonction est passe a acoustimeter_enregistrement.
+% Compatible MATLAB R2016b+ et GNU Octave 7+.
+
+if nargin < 1 || isempty(chemin)
+    [n, d] = uigetfile({'*.bin', 'Fichiers .bin Acoustimeter'}, 'Choisir une mesure Acoustimeter');
+    if isequal(n, 0), M = []; return; end
+    chemin = fullfile(d, n);
+end
+o = struct('trace', true, 'x', '', 'y', {{}}, 'export', {{}}, 'resume', true);
+for k = 1:2:numel(varargin), o.(lower(varargin{k})) = varargin{k + 1}; end
+if ischar(o.y), o.y = {o.y}; end
+if ischar(o.export), o.export = {o.export}; end
+
+% ---------------------------------------------------------------- lecture
+f = fopen(chemin, 'r', 'ieee-le');
+if f < 0, error('Ouverture impossible : %s', chemin); end
+sig = char(fread(f, 8, 'uint8=>char')');
+if numel(sig) >= 8 && strcmp(sig, 'ACOUSBIN')
+    fclose(f);
+    fprintf('%s est un enregistrement (ACOUSBIN) : ouverture avec acoustimeter_enregistrement.\n', chemin);
+    M = acoustimeter_enregistrement(chemin); return;
+end
+if numel(sig) < 4 || ~strcmp(sig(1:4), 'ACMB'), fclose(f); error('%s n''est pas un fichier de mesure Acoustimeter (signature ACMB absente).', chemin); end
+fseek(f, 4, 'bof');
+v = fread(f, 4, 'uint32');                       % version, colonnes, points, taille en-tete
+if numel(v) < 4 || v(1) ~= 1, fclose(f); error('Version ACMB non prise en charge.'); end
+ncol = v(2); npts = v(3);
+texte = native2unicode(fread(f, v(4), 'uint8=>uint8')', 'UTF-8');
+donnees = fread(f, [ncol, npts], 'double')';
+fclose(f);
+if size(donnees, 1) ~= npts, warning('Fichier tronque : %d points lus sur %d.', size(donnees, 1), npts); end
+
+entete = struct(); remarques = cell(0, 2);
+lignes = regexp(texte, '\r?\n', 'split');
+for k = 1:numel(lignes)
+    p = find(lignes{k} == '=', 1);
+    if isempty(p), continue; end
+    cle = lignes{k}(1:p - 1); val = lignes{k}(p + 1:end);
+    r = regexp(cle, '^remarque_(\d+)$', 'tokens', 'once');
+    if ~isempty(r), remarques(end + 1, :) = {str2double(r{1}) + 1, val}; end   %#ok<AGROW>  % indice MATLAB (1 = 1er point)
+    entete.(matlab.lang.makeValidName(cle)) = val;
+end
+if isfield(entete, 'colonnes'), colonnes = strsplit(entete.colonnes, ',');
+else, colonnes = arrayfun(@(k) sprintf('col%d', k), 1:ncol, 'UniformOutput', false); end
+if numel(colonnes) ~= ncol, warning('La cle colonnes ne liste pas %d noms.', ncol); end
+
+M = struct('fichier', chemin, 'entete', entete);
+M.colonnes = colonnes; M.donnees = donnees; M.n_points = size(donnees, 1); M.remarques = remarques;
+M.c = struct();
+for k = 1:min(ncol, numel(colonnes)), M.c.(matlab.lang.makeValidName(colonnes{k})) = donnees(:, k); end
+M.col = @(nom) donnees(:, trouve(colonnes, nom));
+
+% ---------------------------------------------------------------- resume
+if o.resume, resume(M); end
+
+% ---------------------------------------------------------------- export
+[d, n] = fileparts(chemin); base = fullfile(d, n);
+for k = 1:numel(o.export)
+    switch lower(o.export{k})
+        case 'csv'
+            ecrit_csv([base '.csv'], colonnes, donnees);
+            fprintf('CSV ecrit : %s  (separateur ; et virgule decimale, pour Excel en francais)\n', [base '.csv']);
+        case 'mat'
+            mesure = rmfield(M, 'col'); %#ok<NASGU>
+            save([base '.mat'], 'mesure'); fprintf('MAT ecrit : %s  (variable « mesure »)\n', [base '.mat']);
+        otherwise
+            warning('Export inconnu : %s', o.export{k});
+    end
+end
+
+% ---------------------------------------------------------------- courbes
+if o.trace && M.n_points > 0, trace(M, o); end
+end
+
+% =====================================================================================================
+function j = trouve(colonnes, nom)
+% indice d'une colonne : nom exact, sinon debut du nom (majuscules indifferentes)
+j = find(strcmp(colonnes, nom), 1);
+if isempty(j), j = find(strncmpi(colonnes, nom, numel(nom)), 1); end
+if isempty(j), error('Colonne « %s » absente. Colonnes : %s', nom, strjoin(colonnes, ', ')); end
+end
+
+function x = val(M, nom)
+j = find(strcmp(M.colonnes, nom), 1);
+if isempty(j), x = []; else, x = M.donnees(:, j); end
+end
+
+function s = champ(M, cle)
+if isfield(M.entete, cle), s = M.entete.(cle); else, s = '—'; end
+end
+
+function resume(M)
+fprintf('\n=== Mesure Acoustimeter : %s\n', M.fichier);
+fprintf('  Type        : %s\n', champ(M, 'mesure'));
+fprintf('  Date        : %s   %s\n', champ(M, 'date'), ternaire(strcmp(champ(M, 'simulation'), '1'), '(SIMULATION)', ''));
+fprintf('  Ampli       : %s   classe %s\n', champ(M, 'ampli'), champ(M, 'classe'));
+fprintf('  Hydrophone  : %s   distance %s m   gain preampli %s dB\n', champ(M, 'hydrophone'), champ(M, 'distance_m'), champ(M, 'gain_preampli_dB'));
+fprintf('  Points      : %d     Colonnes : %d\n', M.n_points, numel(M.colonnes));
+if isfield(M.entete, 'Lp_max_global_dB_re_1uPa'), fprintf('  Lp max global : %s dB re 1 uPa\n', M.entete.Lp_max_global_dB_re_1uPa); end
+fprintf('  %-34s %8s %14s %14s\n', 'colonne', 'mesures', 'min', 'max');
+for k = 1:numel(M.colonnes)
+    x = M.donnees(:, k); ok = ~isnan(x);
+    if any(ok), fprintf('  %-34s %8d %14.6g %14.6g\n', M.colonnes{k}, sum(ok), min(x(ok)), max(x(ok)));
+    else, fprintf('  %-34s %8s\n', M.colonnes{k}, '—'); end
+end
+nr = size(M.remarques, 1);
+for k = 1:min(nr, 5), fprintf('  Remarque point %d : %s\n', M.remarques{k, 1}, M.remarques{k, 2}); end
+if nr > 5, fprintf('  ... %d remarques au total : voir M.remarques\n', nr); end
+fprintf('\n');
+end
+
+function s = ternaire(c, a, b)
+if c, s = a; else, s = b; end
+end
+
+function ecrit_csv(nom, colonnes, donnees)
+f = fopen(nom, 'w', 'n', 'UTF-8');
+fprintf(f, '%s\n', strjoin(colonnes, ';'));
+for i = 1:size(donnees, 1)
+    l = arrayfun(@(x) num2str(x, '%.10g'), donnees(i, :), 'UniformOutput', false);
+    l(isnan(donnees(i, :))) = {''};
+    fprintf(f, '%s\n', strrep(strjoin(l, ';'), '.', ','));
+end
+fclose(f);
+end
+
+function [xn, xl] = axe_x(M, o)
+if ~isempty(o.x), xn = M.colonnes{trouve(M.colonnes, o.x)};
+else
+    type = lower(champ(M, 'mesure')); xn = 'f_Hz';
+    if ~isempty(strfind(type, 'directiv')), xn = 'angle_deg';
+    elseif ~isempty(strfind(type, 'u=f(i)')), xn = 'Irms_A';
+    elseif ~isempty(strfind(type, 'lin')), xn = 'Urms_V';
+    end
+    x = val(M, xn);
+    if isempty(x) || numel(unique(x(~isnan(x)))) < 2          % la colonne choisie ne varie pas : on prend celle qui varie
+        for c = {'f_Hz', 'angle_deg', 'Urms_V', 'niveau_5413_V_crete', 'temps_s'}
+            x = val(M, c{1});
+            if ~isempty(x) && numel(unique(x(~isnan(x)))) > 1, xn = c{1}; break; end
+        end
+    end
+end
+xl = libelle(xn);
+end
+
+function l = libelle(n)
+t = {'f_Hz', 'Fréquence (Hz)'; 'angle_deg', 'Angle (°)'; 'Urms_V', 'U eff (V)'; 'Irms_A', 'I eff (A)'; 'temps_s', 'Temps (s)';
+     'niveau_5413_V_crete', 'Niveau 5413 (V crête / %)'};
+j = find(strcmp(t(:, 1), n), 1);
+if isempty(j), l = strrep(n, '_', ' '); else, l = t{j, 2}; end
+end
+
+function trace(M, o)
+[xn, xl] = axe_x(M, o); x = val(M, xn);
+[~, ordre] = sort(x); x = x(ordre);
+[~, nom] = fileparts(M.fichier);
+titre = sprintf('%s — %s', nom, champ(M, 'mesure'));
+
+if ~isempty(o.y)                                               % colonnes demandees
+    figure('Name', titre, 'NumberTitle', 'off'); hold on; grid on; leg = {};
+    for k = 1:numel(o.y)
+        j = trouve(M.colonnes, o.y{k}); y = M.donnees(ordre, j);
+        plot(x, y, '.-'); leg{end + 1} = strrep(M.colonnes{j}, '_', '\_'); %#ok<AGROW>
+    end
+    xlabel(xl); legend(leg, 'Location', 'best'); title(strrep(titre, '_', '\_'));
+    if strcmp(xn, 'f_Hz') && min(x) > 0 && max(x) / min(x) > 20, set(gca, 'XScale', 'log'); end
+    return;
+end
+
+% panneaux standard : chacun n'apparait que s'il contient des valeurs
+P = {'TVR / TCR (dB)', {'TVR_dB_re_1uPa_m_per_V', 'TCR_dB_re_1uPa_m_per_A'};
+     'SL, SLmax, Lpmax (dB)', {'SL_dB_re_1uPa_m', 'SLmax_dB_re_1uPa_m', 'Lpmax_Umax_dB_re_1uPa'};
+     'TPR (dB)', {'TPR_dB_re_1uPa_m_per_sqrtW'};
+     'Admittance (mS)', {'G_S', 'B_S', 'Y_S'};
+     'Impédance (Ω)', {'Z_ohm'};
+     'U eff (V)', {'Urms_V'};
+     'I eff (A)', {'Irms_A'};
+     'P (W), Q (var), S (VA)', {'P_W', 'Q_var', 'S_VA'};
+     'Distorsion THD (%)', {'THDF_U_pct', 'THDF_I_pct', 'THDF_hydro_pct'};
+     'Directivité (dB)', {'directivite_dB'};
+     'Températures (°C)', {}};
+tc = M.colonnes(~cellfun(@isempty, regexp(M.colonnes, '^T_.*_C$', 'once')));
+P{end, 2} = tc;
+garde = false(size(P, 1), 1);
+for k = 1:size(P, 1)
+    for c = P{k, 2}
+        if strcmp(c{1}, xn), continue; end
+        y = val(M, c{1}); if ~isempty(y) && any(~isnan(y)), garde(k) = true; end
+    end
+end
+P = P(garde, :); np = size(P, 1);
+if np == 0, warning('Aucune colonne standard à tracer : utilisez l''option ''y''.'); return; end
+nc = min(3, np); nl = ceil(np / nc);
+figure('Name', titre, 'NumberTitle', 'off', 'Position', [40 60 1350 300 * nl]);
+for k = 1:np
+    subplot(nl, nc, k); hold on; grid on; leg = {};
+    for c = P{k, 2}
+        if strcmp(c{1}, xn), continue; end
+        y = val(M, c{1}); if isempty(y) || all(isnan(y)), continue; end
+        y = y(ordre);
+        if ~isempty(strfind(P{k, 1}, 'mS')), y = y * 1e3; end
+        plot(x, y, '.-'); leg{end + 1} = strrep(c{1}, '_', '\_'); %#ok<AGROW>
+    end
+    title(P{k, 1}); xlabel(xl);
+    if numel(leg) > 1, legend(leg, 'Location', 'best', 'FontSize', 7); end
+    if strcmp(xn, 'f_Hz') && min(x) > 0 && max(x) / min(x) > 20, set(gca, 'XScale', 'log'); end
+end
+% unites : TVR dB re 1 uPa.m/V, TCR /A, TPR /sqrt(W), SL dB re 1 uPa.m, Lpmax dB re 1 uPa
+annotation('textbox', [0 0.96 1 0.04], 'String', strrep(titre, '_', '\_'), 'EdgeColor', 'none', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+
+if strcmp(xn, 'angle_deg')                                     % diagramme polaire de directivite
+    d = val(M, 'directivite_dB');
+    if ~isempty(d) && any(~isnan(d))
+        d = d(ordre); r = max(d, -40) + 40;                    % 0 dB au bord, -40 dB au centre
+        figure('Name', [nom ' — directivité'], 'NumberTitle', 'off');
+        polar([x; x(1)] * pi / 180, [r; r(1)]);
+        title('Directivité (bord = 0 dB, centre = -40 dB)');
+    end
+end
+end

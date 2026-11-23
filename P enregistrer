@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Ouvre, affiche et exploite un enregistrement .bin d'Acoustimeter (format ACOUSBIN) :
+Supervision (SAVE-MANU / SAVE-TRIG) ou trames MLI enregistrées depuis Configuration › Ampli › MLI.
+
+En ligne de commande
+    python acoustimeter_enregistrement.py                         # choisir le fichier dans une fenêtre
+    python acoustimeter_enregistrement.py enregistrement.bin      # résumé + courbes
+    python acoustimeter_enregistrement.py enr.bin --voies Hydro --debut 10 --fin 10.05 --ecouter "Hydro 1"
+    python acoustimeter_enregistrement.py trames_MLI.bin --pont MLI1 MLI3 --export wav
+
+Dans un script / Jupyter
+    from acoustimeter_enregistrement import lire
+    r = lire("enregistrement.bin")
+    r.resume()
+    h = r.voie("Hydro 1");  h.temps, h.valeurs          # temps = t0 + i / fs
+    r.trace(voies=["Hydro"], debut=10, fin=10.05)
+    p = r.pont("MLI1", "MLI3")                         # trames MLI -> signal du pont complet filtré
+    r.export_csv(), r.export_wav()
+
+Un fichier de mesure (ACMB) est transmis à acoustimeter_mesure.
+Dépendances : numpy, matplotlib (sounddevice pour écouter, scipy pour l'export MAT : facultatifs).
+"""
+import argparse
+import json
+import os
+import re
+import struct
+import sys
+from dataclasses import dataclass, field
+
+import numpy as np
+
+
+@dataclass(eq=False)
+class Voie:
+    nom: str
+    groupe: str
+    unite: str
+    fs: float
+    t0: float
+    dtype: str
+    valeurs: np.ndarray = field(repr=False)
+
+    @property
+    def temps(self):
+        return self.t0 + np.arange(len(self.valeurs)) / self.fs
+
+    @property
+    def duree(self):
+        return len(self.valeurs) / self.fs
+
+    def fenetre(self, debut=None, fin=None):
+        """Copie de la voie limitée à [debut, fin] (secondes depuis le début de l'enregistrement)."""
+        i0 = 0 if debut is None else max(0, int(np.ceil((debut - self.t0) * self.fs)))
+        i1 = len(self.valeurs) if fin is None else max(i0, min(len(self.valeurs), int(np.floor((fin - self.t0) * self.fs)) + 1))
+        return Voie(self.nom, self.groupe, self.unite, self.fs, self.t0 + i0 / self.fs, self.dtype, self.valeurs[i0:i1])
+
+
+@dataclass(eq=False)
+class Pont:
+    signal: np.ndarray = field(repr=False)
+    fs: float
+    t0: float
+    description: str
+
+    @property
+    def temps(self):
+        return self.t0 + (np.arange(len(self.signal)) + 0.5) / self.fs
+
+
+def _propre(s):
+    return re.sub(r"^_|_$", "", re.sub(r"[^A-Za-z0-9]+", "_", s))
+
+
+def ecrit_wav(chemin, x, fs):
+    """WAV float 32 bits, mono, normalisé (le niveau absolu est dans le CSV)."""
+    x = np.asarray(x, dtype=np.float64); x = x - x.mean(); x = (x / (np.abs(x).max() + 1e-30) * 0.99).astype("<f4")
+    fs = int(round(fs)); n = x.nbytes
+    with open(chemin, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", 36 + n) + b"WAVE")
+        f.write(b"fmt " + struct.pack("<IHHIIHH", 16, 3, 1, fs, fs * 4, 4, 32))
+        f.write(b"data" + struct.pack("<I", n) + x.tobytes())
+    print(f"WAV écrit : {chemin}  ({fs} Hz, normalisé)")
+
+
+class Enregistrement:
+    def __init__(self, fichier, entete, voies):
+        self.fichier = fichier
+        self.titre = entete.get("titre", "")
+        self.debut = entete.get("debut", "")
+        self.meta = entete.get("meta", {}) or {}
+        self.evenements = entete.get("evenements", []) or []
+        self.voies = voies
+
+    # ------------------------------------------------------------------ accès
+    def indice(self, nom):
+        """Voie par nom exact, début du nom, ou morceau du nom (ex. 'MLI1' dans « A1 Bras A — haut (MLI1) »)."""
+        noms = [v.nom for v in self.voies]
+        for test in (lambda n: n == nom, lambda n: n.lower().startswith(nom.lower()), lambda n: nom.lower() in n.lower()):
+            for k, n in enumerate(noms):
+                if test(n):
+                    return k
+        raise KeyError(f"Voie « {nom} » absente. Voies : {', '.join(noms)}")
+
+    def voie(self, nom):
+        return self.voies[self.indice(nom)]
+
+    def __getitem__(self, nom):
+        return self.voie(nom)
+
+    def selection(self, voies=None):
+        if not voies:
+            return list(self.voies)
+        res = []
+        for n in voies:
+            if isinstance(n, int):
+                k = [n]
+            else:
+                k = [i for i, v in enumerate(self.voies) if v.nom.lower().startswith(n.lower())] or [self.indice(n)]
+            res += [self.voies[i] for i in k if all(self.voies[i] is not r for r in res)]
+        return res
+
+    def pont(self, haut_a, haut_b, fs_sortie=200000):
+        """Pont complet MLI : (haut bras A) − (haut bras B) en −1/0/+1, puis moyenne par paquets (filtre passe-bas)."""
+        a, b = self.voie(haut_a), self.voie(haut_b)
+        n = min(len(a.valeurs), len(b.valeurs))
+        s = a.valeurs[:n].astype(np.float32) - b.valeurs[:n].astype(np.float32)
+        k = max(1, int(round(a.fs / fs_sortie))); m = n // k
+        s = s[:m * k].reshape(m, k).mean(axis=1)
+        return Pont(s, a.fs / k, a.t0, f"{a.nom} − {b.nom}, moyenne sur {k} échantillons")
+
+    # ------------------------------------------------------------------ affichage
+    def resume(self):
+        print(f"\n=== Enregistrement Acoustimeter : {self.fichier}")
+        print(f"  Titre : {self.titre}     Début : {self.debut}     Voies : {len(self.voies)}     Événements : {len(self.evenements)}")
+        print(f"  {'voie':32s} {'groupe':15s} {'unité':6s} {'fs (Hz)':>12s} {'t0 (s)':>10s} {'échantillons':>12s} {'durée (s)':>10s}")
+        for v in self.voies:
+            print(f"  {v.nom:32s} {v.groupe:15s} {v.unite:6s} {v.fs:12g} {v.t0:10.4g} {len(v.valeurs):12d} {v.duree:10.4g}")
+        for e in self.evenements:
+            print(f"  t = {e.get('t', 0):8.3f} s  {e.get('type', ''):16s} {e.get('detail', '')}")
+        if self.meta:
+            print("  meta : " + "; ".join(f"{k}={v}" if not isinstance(v, (list, dict)) else f"{k}=[...]" for k, v in self.meta.items()))
+        print()
+
+    def trace(self, voies=None, debut=None, fin=None, pont=None, png=None, montrer=True, nmax_mli=5000):
+        """Une ligne de courbes par groupe (Température, Tension, Courant, Hydrophone, MLI…), événements en pointillés."""
+        import matplotlib.pyplot as plt
+        V = self.selection(voies)
+        groupes = list(dict.fromkeys(v.groupe for v in V))
+        n = len(groupes) + (pont is not None)
+        if n == 0:
+            print("Rien à tracer."); return
+        nom = os.path.splitext(os.path.basename(self.fichier))[0]
+        fig, axs = plt.subplots(n, 1, figsize=(13, min(10, 2.6 * n + 0.8)), sharex=True, squeeze=False, num=f"{nom} — {self.titre}")
+        axs = axs[:, 0]
+        for a, g in zip(axs, groupes):
+            W = [v.fenetre(debut, fin) for v in V if v.groupe == g]
+            if g == "MLI":
+                coupe = False
+                for k, w in enumerate(W):
+                    x = w.valeurs
+                    if len(x) > nmax_mli: x, coupe = x[:nmax_mli], True
+                    if len(x): a.step(w.t0 + np.arange(len(x)) / w.fs, x * 0.8 + 1.2 * k, where="post", lw=.8)
+                a.set_yticks([1.2 * k + 0.4 for k in range(len(W))]); a.set_yticklabels([w.nom for w in W], fontsize=7)
+                a.set_title("MLI (trames 0/1)" + (f" — {nmax_mli} premiers échantillons (debut / fin pour zoomer)" if coupe else ""))
+            else:
+                # une voie lente (température, valeur efficace par seconde) garde un point de chaque côté de la fenêtre
+                W = [v.fenetre(None if debut is None else debut - 1 / v.fs, None if fin is None else fin + 1 / v.fs)
+                     for v in V if v.groupe == g]
+                for w in W:
+                    if not len(w.valeurs): continue
+                    t, y = _enveloppe(w.temps, w.valeurs, 40000)
+                    a.plot(t, y, lw=.8, label=w.nom)
+                a.set_title(f"{g} ({', '.join(dict.fromkeys(w.unite for w in W))})")
+                if len(W) > 1: a.legend(fontsize=7, loc="upper right")
+            a.grid(True, alpha=.4)
+            for e in self.evenements:
+                t = e.get("t", 0)
+                if (debut is None or t >= debut) and (fin is None or t <= fin):
+                    a.axvline(t, color="0.6", ls="--", lw=.8)
+                    a.text(t, 1, " " + e.get("type", ""), transform=a.get_xaxis_transform(), fontsize=7, color="0.4", va="top")
+        if pont is not None:
+            a = axs[-1]; i = np.ones(len(pont.signal), bool); t = pont.temps
+            if debut is not None: i &= t >= debut
+            if fin is not None: i &= t <= fin
+            a.plot(t[i], pont.signal[i], lw=.9); a.set_ylim(-1.1, 1.1); a.grid(True, alpha=.4)
+            a.set_title(f"Pont complet : {pont.description}")
+        if debut is not None or fin is not None:
+            axs[-1].set_xlim(debut, fin)
+        axs[-1].set_xlabel(f"Temps (s) depuis le début de l'enregistrement — {self.debut}")
+        fig.tight_layout()
+        if png:
+            fig.savefig(png, dpi=120, bbox_inches="tight"); print(f"Figure écrite : {png}")
+        if montrer:
+            plt.show()
+
+    # ------------------------------------------------------------------ export / écoute
+    def export_csv(self, voies=None, debut=None, fin=None, sep=";", virgule=True):
+        base = os.path.splitext(self.fichier)[0]
+        for v in self.selection(voies):
+            w = v.fenetre(debut, fin); nom = f"{base}_{_propre(v.nom)}.csv"
+            with open(nom, "w", encoding="utf-8-sig", newline="") as f:
+                f.write(f"temps_s{sep}{_propre(v.nom)}_{_propre(v.unite)}\n")
+                lignes = [f"{t:.9g}{sep}{x:.7g}" for t, x in zip(w.temps, w.valeurs.astype(float))]
+                txt = "\n".join(lignes)
+                f.write((txt.replace(".", ",") if virgule else txt) + "\n")
+            print(f"CSV écrit : {nom}")
+
+    def export_wav(self, voies=None, debut=None, fin=None, pont=None):
+        base = os.path.splitext(self.fichier)[0]
+        for v in self.selection(voies):
+            if v.dtype == "u8":
+                print(f"WAV ignoré pour {v.nom} : trame 0/1 (utilisez le pont pour un signal écoutable)"); continue
+            w = v.fenetre(debut, fin)
+            if len(w.valeurs): ecrit_wav(f"{base}_{_propre(v.nom)}.wav", w.valeurs, w.fs)
+        if pont is not None:
+            ecrit_wav(f"{base}_pont.wav", pont.signal, pont.fs)
+
+    def export_mat(self):
+        from scipy.io import savemat
+        base = os.path.splitext(self.fichier)[0]
+        d = {"titre": self.titre, "debut": self.debut, "voies": [
+            {"nom": v.nom, "groupe": v.groupe, "unite": v.unite, "fs": v.fs, "t0": v.t0, "valeurs": v.valeurs} for v in self.voies]}
+        savemat(base + ".mat", {"enregistrement": d}); print(f"MAT écrit : {base}.mat")
+
+    def ecouter(self, nom, debut=None, fin=None, pont=None):
+        if nom == "pont":
+            if pont is None: raise ValueError("Donnez aussi le pont (haut A, haut B).")
+            x, fs = pont.signal.astype(float), pont.fs
+        else:
+            w = self.voie(nom).fenetre(debut, fin); x, fs = w.valeurs.astype(float), w.fs
+        if not 1000 <= fs <= 192000:
+            print(f"Cadence {fs:g} Hz non jouable par la carte son : exportez en WAV."); return
+        try:
+            import sounddevice as sd
+        except ImportError:
+            print("Module sounddevice absent (pip install sounddevice) : exportez en WAV."); return
+        x = x - x.mean(); x = x / (np.abs(x).max() + 1e-30)
+        print(f"Lecture : {len(x) / fs:.1f} s à {fs:g} Hz"); sd.play(x.astype(np.float32), int(fs)); sd.wait()
+
+
+def _enveloppe(t, y, nmax):
+    """Réduit l'affichage à ~nmax points en gardant min et max de chaque paquet (les pics restent visibles)."""
+    n = len(y)
+    if n <= nmax:
+        return t, y
+    k = int(np.ceil(2 * n / nmax)); m = n // k
+    Y = y[:m * k].reshape(m, k).astype(float); T = t[:m * k].reshape(m, k)
+    return np.column_stack([T[:, 0], T[:, -1]]).ravel(), np.column_stack([Y.min(1), Y.max(1)]).ravel()
+
+
+def lire(chemin):
+    """Lit un fichier ACOUSBIN et renvoie un Enregistrement (un ACMB est lu par acoustimeter_mesure)."""
+    with open(chemin, "rb") as f:
+        b = f.read()
+    if b[:4] == b"ACMB":
+        print(f"{chemin} est une mesure (ACMB) : lecture avec acoustimeter_mesure.")
+        import acoustimeter_mesure
+        return acoustimeter_mesure.lire(chemin)
+    if b[:8] != b"ACOUSBIN":
+        raise ValueError(f"{chemin} n'est pas un enregistrement Acoustimeter (signature ACOUSBIN absente)")
+    version, h = struct.unpack_from("<2I", b, 8)
+    if version != 1:
+        raise ValueError(f"version ACOUSBIN {version} non prise en charge")
+    entete = json.loads(b[16:h].decode("utf-8").strip().strip("\0"))
+    dv = entete.get("voies", []) or []
+    if not dv:
+        print("Attention : en-tête sans voie — l'enregistrement n'a pas été fermé normalement (arrêt brutal d'Acoustimeter). "
+              "Les données sont dans le fichier mais ne peuvent pas être attribuées à une voie.")
+    morceaux = [[] for _ in dv]
+    p = h
+    while p + 8 <= len(b):
+        i, n = struct.unpack_from("<2I", b, p); p += 8
+        if i >= len(dv):
+            break
+        u8 = dv[i].get("dtype") == "u8"; taille = n * (1 if u8 else 4)
+        if p + taille > len(b):
+            print("Attention : fichier tronqué (dernier bloc incomplet)."); taille = (len(b) - p) // (1 if u8 else 4) * (1 if u8 else 4)
+        morceaux[i].append(np.frombuffer(b, dtype=np.uint8 if u8 else "<f4", count=taille // (1 if u8 else 4), offset=p))
+        p += taille
+    voies = []
+    for d, m in zip(dv, morceaux):
+        u8 = d.get("dtype") == "u8"
+        x = np.concatenate(m) if m else np.zeros(0, np.uint8 if u8 else np.float32)
+        voies.append(Voie(d["nom"], d.get("groupe", ""), d.get("unite", ""), float(d["fs"]), float(d.get("t0", 0)), d.get("dtype", "f32"), x))
+    return Enregistrement(chemin, entete, voies)
+
+
+def _choisir_fichier():
+    import tkinter as tk
+    from tkinter import filedialog
+    tk.Tk().withdraw()
+    return filedialog.askopenfilename(title="Choisir un enregistrement Acoustimeter", filetypes=[("Fichiers .bin", "*.bin")])
+
+
+def main():
+    p = argparse.ArgumentParser(description="Enregistrement Acoustimeter (.bin ACOUSBIN) : résumé, courbes, export, écoute.")
+    p.add_argument("fichier", nargs="?", help="fichier .bin (absent : fenêtre de choix)")
+    p.add_argument("--voies", nargs="+", help="voies à tracer / exporter (début du nom suffit)")
+    p.add_argument("--debut", type=float, help="début de la fenêtre (s)")
+    p.add_argument("--fin", type=float, help="fin de la fenêtre (s)")
+    p.add_argument("--pont", nargs=2, metavar=("HAUT_A", "HAUT_B"), help="MLI : reconstruit le pont complet A − B")
+    p.add_argument("--fs-pont", type=float, default=200000, help="cadence du pont après filtrage (défaut 200000 Hz)")
+    p.add_argument("--ecouter", help="nom de voie, ou 'pont'")
+    p.add_argument("--export", nargs="+", choices=["csv", "wav", "mat"], default=[], help="écrit à côté du .bin")
+    p.add_argument("--png", help="enregistre la figure dans ce fichier")
+    p.add_argument("--pas-de-trace", action="store_true", help="ne pas ouvrir de fenêtre de courbes")
+    a = p.parse_args()
+    chemin = a.fichier or _choisir_fichier()
+    if not chemin:
+        return
+    if a.pas_de_trace:
+        import matplotlib; matplotlib.use("Agg")
+    r = lire(chemin)
+    if not isinstance(r, Enregistrement):
+        r.resume()
+        if not a.pas_de_trace or a.png: r.trace(png=a.png, montrer=not a.pas_de_trace)
+        return
+    pont = r.pont(*a.pont, fs_sortie=a.fs_pont) if a.pont else None
+    r.resume()
+    if pont is not None:
+        print(f"  Pont complet : {pont.description} -> {pont.fs:g} Hz, {len(pont.signal)} points\n")
+    if "csv" in a.export: r.export_csv(a.voies, a.debut, a.fin)
+    if "wav" in a.export: r.export_wav(a.voies, a.debut, a.fin, pont)
+    if "mat" in a.export: r.export_mat()
+    if a.ecouter: r.ecouter(a.ecouter, a.debut, a.fin, pont)
+    if not a.pas_de_trace or a.png:
+        r.trace(a.voies, a.debut, a.fin, pont, png=a.png, montrer=not a.pas_de_trace)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

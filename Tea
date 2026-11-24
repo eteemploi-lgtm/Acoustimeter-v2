@@ -1,0 +1,37 @@
+@echo off
+setlocal
+set "VS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+set "KITS=C:\Program Files (x86)\Windows Kits\10"
+set "QT=D:\maxime\C\Qt\6.12.0\msvc2022_64"
+
+rem --- versions installees (la plus recente)
+for /d %%v in ("%VS%\VC\Tools\MSVC\*") do set "MSVC=%%v"
+for /d %%v in ("%KITS%\Include\10.*") do set "SDKVER=%%~nxv"
+if not defined MSVC (echo MSVC introuvable dans %VS%\VC\Tools\MSVC & goto erreur)
+if not defined SDKVER (echo Windows SDK introuvable dans %KITS%\Include & goto erreur)
+echo MSVC : %MSVC%
+echo SDK  : %SDKVER%
+
+rem --- environnement 64 bits (ce que fait normalement vcvars64)
+set "PATH=%MSVC%\bin\Hostx64\x64;%KITS%\bin\%SDKVER%\x64;%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%VS%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%PATH%"
+set "INCLUDE=%MSVC%\include;%KITS%\Include\%SDKVER%\ucrt;%KITS%\Include\%SDKVER%\um;%KITS%\Include\%SDKVER%\shared;%KITS%\Include\%SDKVER%\winrt"
+set "LIB=%MSVC%\lib\x64;%KITS%\Lib\%SDKVER%\ucrt\x64;%KITS%\Lib\%SDKVER%\um\x64"
+
+where cl || goto erreur
+where rc || goto erreur
+where ninja || goto erreur
+
+cd /d "%~dp0"
+if exist build rmdir /s /q build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=%QT% -DCMAKE_CXX_COMPILER=cl -DCMAKE_RC_COMPILER=rc || goto erreur
+cmake --build build || goto erreur
+"%QT%\bin\windeployqt" build\acoustimeter_mesure.exe build\acoustimeter_enregistrement.exe
+echo.
+echo Compilation terminee : build\acoustimeter_mesure.exe et build\acoustimeter_enregistrement.exe
+pause
+exit /b 0
+:erreur
+echo.
+echo ECHEC de la compilation : voir les messages ci-dessus.
+pause
+exit /b 1

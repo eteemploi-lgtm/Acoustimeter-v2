@@ -1,0 +1,3 @@
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=D:/maxime/C/Qt/6.12.0/msvc2022_64
+cmake --build build
+D:\prenom\C\Qt\6.12.0\msvc2022_64\bin\windeployqt build\acoustimeter_mesure.exe build\acoustimeter_enregistrement.exe

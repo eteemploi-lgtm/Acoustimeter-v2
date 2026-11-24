@@ -1,0 +1,23 @@
+# Lecteurs C++ des fichiers .bin d'Acoustimeter (Qt 6 Widgets, sans Qt Charts).
+#   cmake -S . -B build -DCMAKE_PREFIX_PATH=C:/Qt/6.12.0/msvc2022_64
+#   cmake --build build --config Release
+cmake_minimum_required(VERSION 3.19)
+project(AcoustimeterLecteurs LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
+if(MSVC)
+    add_compile_options(/utf-8)          # sources en UTF-8 (accents des textes affiches)
+endif()
+
+add_library(acoustimeter_lecture STATIC
+    fichiers_acoustimeter.h fichiers_acoustimeter.cpp
+    fenetre_graphes.h fenetre_graphes.cpp
+    programmes.h programmes.cpp)
+target_link_libraries(acoustimeter_lecture PUBLIC Qt6::Widgets)
+
+# programmes console : le resume s'affiche dans l'invite de commandes, les courbes dans une fenetre
+add_executable(acoustimeter_mesure acoustimeter_mesure.cpp)
+target_link_libraries(acoustimeter_mesure PRIVATE acoustimeter_lecture)
+add_executable(acoustimeter_enregistrement acoustimeter_enregistrement.cpp)
+target_link_libraries(acoustimeter_enregistrement PRIVATE acoustimeter_lecture)

@@ -1,3 +1,1087 @@
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=D:/maxime/C/Qt/6.12.0/msvc2022_64
-cmake --build build
-D:\prenom\C\Qt\6.12.0\msvc2022_64\bin\windeployqt build\acoustimeter_mesure.exe build\acoustimeter_enregistrement.exe
+ACOUSTIMETER v59 — MODIFICATIONS PROPOSÉES (à relire et ajuster avant génération)
+Date : 27/11/2026            Base : source v58 (avec la correction « 10 % du calibre »)
+==============================================================================
+
+SOMMAIRE
+  Partie A — La liste de la feuille (ce que j'ai compris, choix retenus)
+  Partie B — Le message « PWM multiniveaux » (capture du 27/11)
+  Partie C — Le code, point par point
+  Partie D — Points sans code (en attente de vos réponses)
+  Partie E — Essais à faire au banc
+
+COMMENT LIRE LE CODE (Partie C)
+  Chaque bloc indique le fichier et la ligne approximative, puis un extrait :
+    - une ligne qui commence par un espace  : ligne existante, inchangée (sert à se repérer)
+    - une ligne qui commence par « - »      : ligne existante à SUPPRIMER
+    - une ligne qui commence par « + »      : ligne à AJOUTER
+  Pour appliquer à la main : retrouver l'endroit avec les lignes inchangées,
+  supprimer les « - », ajouter les « + » (sans le signe + lui-même).
+  Toutes les modifications sont repérées par « v59 » dans les commentaires.
+  L'ensemble a été compilé sans erreur sur une copie du source v58.
+  Rien n'a été modifié dans la version de référence : c'est une proposition.
+
+
+==============================================================================
+PARTIE A — LA LISTE DE LA FEUILLE
+==============================================================================
+[CHOIX] = décision que j'ai prise pour pouvoir écrire le code ; à changer si besoin.
+
+1. UN SEUL BOUTON LECTURE / PAUSE
+   Lecture et Pause sont fusionnés en un seul bouton qui change d'aspect :
+   « ▶ Lecture » à l'arrêt, « ⏸ Pause » pendant la lecture, « ▶ Reprendre » en pause.
+   Le bouton Stop reste séparé.
+   [CHOIX] Appliqué aux trois endroits qui ont ces boutons :
+           Configuration › Ampli › MLI (Aperçu de l'ampli), Configuration › Ampli
+           classe AB › Live, et la fenêtre Analyse.
+
+2. RETIRER LE CALIBRE DE LA CONFIGURATION DE LA SONDE
+   [CHOIX] Retrait de « Calibre de la sonde » (sondes de COURANT) : il faisait
+           doublon avec « Sensibilité de la sonde » ; il est maintenant rempli
+           automatiquement (caché) et reste enregistré.
+           « Calibre de la voie (Vpp) » (calibre du PXIe-5108) est CONSERVÉ : il
+           sert au calcul des tensions. Si c'est celui-là qu'il faut retirer,
+           voir la variante en partie C, point 2.
+
+3. CURSEURS DE MESURE (FFT / TEMPS)
+   Nouvelle case « Curseurs de mesure » dans le menu de droite de chaque
+   graphe de la Supervision. Deux curseurs verticaux C1 (jaune) et C2 (vert),
+   déplaçables à la souris. Un cadre affiche, sur la 1re sonde affichée :
+     - en temporel : t et valeur sous C1 et C2, Δt, 1/Δt, Δ valeur ;
+     - en FFT : f et niveau sous C1 et C2 (accroché à la raie la plus forte
+       à ±2 points), Δf, Δ niveau en dB.
+   Sans la case cochée : comportement actuel (en FFT, deux raies automatiques).
+   Pas de curseurs en défilement (base de temps ≥ 1 s/div).
+
+4. PARAMÈTRES DU GÉNÉRATEUR → MLI
+   Pas de code : sens à préciser (voir partie D).
+
+5. LANCEMENT : NI-PXIe-8301 RETIRÉ, ÉTAT EN OK / KO
+   Le PXIe-8301 (liaison Thunderbolt PC ↔ châssis) n'apparaît plus dans la
+   liste ni dans les étapes. Colonne « État » : « OK » vert ou « KO » rouge,
+   en gras, pour tous les modules. Le détail (message du pilote, n° de série)
+   s'affiche en passant la souris sur OK / KO.
+
+6. AU LANCEMENT : SUPERVISION + CONFIGURATION
+   [CHOIX] La Supervision s'ouvre en plein écran et la Configuration s'ouvre
+           automatiquement par-dessus (premier plan).
+
+7. « GESTION DE LA BASE » DÉPLACÉE DANS LA SUPERVISION
+   [CHOIX] « Onglets de supervision » compris comme les boutons de la barre du
+           haut (ANALYSE, MESURE, CONFIG). Ajout d'un bouton « 🗄 BASE » à côté,
+           et d'une entrée « Outils › Gestion de la base... ». La page s'ouvre
+           dans sa propre fenêtre. Elle est retirée de l'arborescence de la
+           Configuration. Le bouton « Gérer la base… » de la page « Banc et
+           opérateur » ouvre cette même fenêtre.
+
+8. ARRÊT D'URGENCE RETIRÉ DE L'ÉCRAN SUPERVISION
+   [CHOIX] Le bouton rouge de la barre est retiré. L'entrée
+           « Acquisition › ARRÊT D'URGENCE » du menu est conservée.
+           À noter : « ARRÊTER ÉMISSION » coupe toujours l'émission.
+
+9. ZOOM SUR LE SIGNAL
+   [CHOIX] Sur l'aperçu de l'ampli (Configuration › Ampli › MLI) :
+           molette = zoom (la fenêtre se resserre autour du point visé),
+           glisser = déplacer, double-clic = fenêtre de 2 ms.
+           Les champs « Début » et « Fenêtre » suivent automatiquement.
+
+10. AMPLI CLASSE AB : TENSION LIMITÉE, AVEC MESSAGE
+   Nouveau champ dans « Ampli externe » : « Tension max admissible à l'entrée
+   de l'ampli (Vcc) », 12 par défaut. Si l'amplitude saisie dépasse le
+   maximum, elle est ramenée au maximum dès la fin de la saisie et un message
+   orange l'explique, par exemple :
+     « Amplitude ramenée à 12 Vcc : tension maximale admissible à l'entrée
+       de l'ampli externe. »
+   Maximum utilisé = le plus petit entre la limite du PXIe-5413 (12 Vcc sur
+   50 Ω, 24 Vcc à vide) et la limite de l'ampli externe (si « Ampli externe
+   présent » est coché).
+   [CHOIX] Unité Vcc (crête à crête), comme le champ Amplitude existant.
+           Si c'est 12 V crête : saisir 24 dans le nouveau champ.
+
+11. PROBLÈME DE TEMPÉRATURE
+   Pas de code : description du problème attendue (voir partie D).
+
+
+==============================================================================
+PARTIE B — LE MESSAGE « PWM MULTINIVEAUX » (capture du 27/11)
+==============================================================================
+Ce qui se passait :
+  Configuration en convertisseur multiniveaux 5 niveaux = 4 comparateurs,
+  sorties directe + complémentaire = 8 trames, affectées à MLI1…MLI8.
+  L'aperçu les calculait déjà, mais la vérification avant génération
+  refusait toute modulation autre que « PWM » (2 niveaux).
+
+Correction (partie C, point 12) :
+  « PWM multiniveaux » est acceptée par « Générer », « Lecture » (émission
+  sur la 6537), « Démarrer émission » et la mesure en classe D.
+  Les trames envoyées sont celles de l'aperçu : la sortie de chaque
+  comparateur (porteuse k contre signal), directe et complémentaire.
+
+⚠ À VÉRIFIER AVANT DE BRANCHER UN AMPLI RÉEL :
+  Ces trames sont les sorties des comparateurs, pas un calcul des commandes
+  d'interrupteurs propre à la topologie. Elles conviennent quand chaque
+  comparateur commande directement une paire d'interrupteurs (cas courant en
+  CHB avec Phase Shifted, ou NPC en PD/POD). En Flying Capacitor ou MMC, une
+  logique d'équilibrage est en général nécessaire : vérifier d'abord à
+  l'oscilloscope, ampli hors tension (« Test sans ampli » coché).
+
+
+==============================================================================
+PARTIE C — LE CODE, POINT PAR POINT
+==============================================================================
+
+
+##############################################################################
+# POINT 1 — UN SEUL BOUTON LECTURE / PAUSE
+##############################################################################
+  Le bouton Pause existe toujours dans le code mais il est masqué ; le bouton Lecture
+  fait Lecture ou Pause selon l'état, et son texte change. Aucun autre comportement modifié.
+  (L'aperçu MLI : voir aussi le bloc commun aux points 1 et 9, plus bas.)
+
+  >>> Fichier : src/MliPages.cpp   (vers la ligne 342)
+  --------------------------------------------------------------------------
+   void MliVoicesPage::setPlayState(int s)       // 0 stop, 1 lecture, 2 pause
+   {
+       m_playing = (s == 1);
+  -    m_play->setEnabled(s != 1); m_pause->setEnabled(s == 1); m_stop->setEnabled(s != 0);
+  +    m_play->setEnabled(true); m_pause->setEnabled(false); m_stop->setEnabled(s != 0);
+  +    m_play->setText(s == 1 ? "⏸  Pause" : s == 2 ? "▶  Reprendre" : "▶  Lecture");   // v59 : bouton unique
+   }
+   void MliVoicesPage::scheduleRender() { m_debounce.start(); }
+   void MliVoicesPage::play()
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 154)
+  --------------------------------------------------------------------------
+       connect(m_level, &QLineEdit::textEdited, this, levelFromText);
+       connect(m_slider, &QSlider::valueChanged, this, [this](int v) { m_level->setText(QString::number(v)); m_m->niveau = QString::number(v); m_m->touch(); recompute(); render(); if (m_outActive) emit outputPeakChanged(currentPeak()); emit modified(); });
+       connect(m_play, &QPushButton::clicked, this, [this]() {
+  +        if (m_state == 1) { stopOutput("bouton Pause"); setState(2); emit transport("pause"); return; }   // v59 : bouton unique Play / Pause
+           if (!m_err.isEmpty()) { m_status->setStyleSheet("color:#ff4444;"); m_status->setText("Lecture impossible : " + m_err); return; }
+           if (m_m->voie.isEmpty()) { m_status->setStyleSheet("color:#ff4444;"); m_status->setText("Lecture impossible : aucune voie de génération analogique (étape 3)."); return; }
+           const QString v = validate(); if (!v.isEmpty()) { m_status->setStyleSheet("color:#ff4444;"); m_status->setText("Lecture impossible : " + v); return; }
+           m_status->setStyleSheet("color:#8b949e;"); setState(1); emit transport("play");
+           if (m_emit->isChecked()) { m_outActive = true; emit outputRequested(m_x, m_fs, m_m->voie, m_m->charge.startsWith("50") ? false : true, currentPeak(), m_noThermal->isChecked()); } });
+  -    connect(m_pause, &QPushButton::clicked, this, [this]() { stopOutput("bouton Pause"); setState(2); emit transport("pause"); });
+  +    m_pause->hide();                                   // v59 : la pause est faite par le bouton Play
+       connect(m_stop, &QPushButton::clicked, this, [this]() { stopOutput("bouton Stop"); m_start = 0; setState(0); emit transport("stop"); render(); });
+       connect(m_m, &AnalogModel::changed, this, [this]() { if (isVisible()) { recompute(); render(); } });
+       setState(0); refresh();
+   }
+   void AnalogLivePage::setState(int s)
+   {
+  -    m_state = s; m_play->setEnabled(s != 1); m_pause->setEnabled(s == 1); m_stop->setEnabled(s != 0);
+  +    m_state = s; m_play->setEnabled(true); m_pause->setEnabled(false); m_stop->setEnabled(s != 0);
+  +    m_play->setText(s == 1 ? "⏸  Pause" : s == 2 ? "▶  Reprendre" : "▶  Play");     // v59 : bouton unique
+       const bool lock = (s != 0); const bool changed = m_m->locked != lock; m_m->locked = lock;
+       if (s == 1) { m_clock.start(); m_timer.start(); } else m_timer.stop();
+       if (changed) emit m_m->changed();
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ReplayWindow.cpp   (vers la ligne 288)
+  --------------------------------------------------------------------------
+   
+       connect(m_open, &QPushButton::clicked, this, &ReplayWindow::openFile);
+       connect(m_source, &QComboBox::currentIndexChanged, this, &ReplayWindow::onSourceChanged);
+  -    connect(m_play, &QPushButton::clicked, this, &ReplayWindow::play);
+  -    connect(m_pause, &QPushButton::clicked, this, &ReplayWindow::pause);
+  +    connect(m_play, &QPushButton::clicked, this, [this]() { if (m_state == 1) pause(); else play(); });   // v59 : bouton unique
+  +    m_pause->hide();
+       connect(m_stop, &QPushButton::clicked, this, &ReplayWindow::stop);
+       connect(m_tree, &QTreeWidget::itemChanged, this, [this]() { if (!m_loadingTree) onTreeChanged(); });
+       connect(m_wavTree, &QTreeWidget::itemChanged, this, [this]() { if (!m_loadingTree) onWavToggled(); });
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ReplayWindow.cpp   (vers la ligne 460)
+  --------------------------------------------------------------------------
+   void ReplayWindow::setState(int s)
+   {
+       m_state = s;
+  -    m_play->setEnabled(s != 1); m_pause->setEnabled(s == 1);
+  -    m_play->setStyleSheet(s == 1 ? "color:#00e676;font-weight:bold;" : QString());
+  +    m_play->setEnabled(true); m_pause->setEnabled(false);
+  +    m_play->setText(s == 1 ? "⏸  Pause" : s == 2 ? "▶  Reprendre" : "▶  Play");     // v59 : bouton unique
+  +    m_play->setStyleSheet(s == 1 ? "color:#ffaa00;font-weight:bold;" : QString());
+       m_pause->setStyleSheet(s == 2 ? "color:#ffaa00;font-weight:bold;" : QString());
+   }
+   
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 2 — RETIRER LE CALIBRE DE LA SONDE
+##############################################################################
+  Le champ « Calibre de la sonde » (courant) n'est plus ajouté au formulaire : il est créé
+  caché. La sensibilité continue de le remplir, les anciennes configurations se relisent.
+
+  VARIANTE (si c'est « Calibre de la voie (Vpp) » qu'il faut retirer) — NON appliquée :
+  dans ProbePages.cpp, fonction ProbeCard::onImpedanceChanged(), après la ligne
+      Ui::setComboItems(static_cast<QComboBox*>(m_w["calibre"]), Module5108::ranges(val("impedance")));
+  ajouter :
+      { auto* c = static_cast<QComboBox*>(m_w["calibre"]); if (c->count()) c->setCurrentIndex(c->count() - 1); }
+  (= le plus grand calibre, aucun risque de saturation mais moins de résolution),
+  et retirer les deux lignes  << qMakePair(QString("Calibre de la voie (Vpp)"), make("calibre", 0));
+  en les remplaçant par  { QWidget* c = make("calibre", 0); c->setParent(this); c->hide(); }
+
+  >>> Fichier : src/ProbePages.cpp   (vers la ligne 80)
+  --------------------------------------------------------------------------
+                      << qMakePair(QString("Calibre de la voie (Vpp)"), make("calibre", 0));
+           dispFields << qMakePair(QString("Nom du tracé"), make("label", 1));
+       } else if (kind == Current) {
+  -        probeFields << qMakePair(QString("Calibre de la sonde"), make("calibre_sonde", 0));
+  +        // v59 : « Calibre de la sonde » retire de l'ecran. Le champ existe toujours (cache) : il est rempli
+  +        // automatiquement quand on choisit la sensibilite et reste enregistre dans la configuration.
+  +        { QWidget* cs = make("calibre_sonde", 0); cs->setParent(this); cs->hide(); }
+           probeFields << qMakePair(QString("Sensibilité de la sonde"), make("sensibilite", 0))   // v47 : liste issue de la base
+                       << qMakePair(QString("Sens de mesure"), make("sens_mesure", 2));
+           chanFields << qMakePair(QString("Voie physique"), make("voie", 0))
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 3 — CURSEURS DE MESURE (FFT / TEMPS)
+##############################################################################
+  En-tête : nouvelles variables (curseurs actifs, positions C1/C2 en fraction de largeur)
+  et nouvelle fonction paintCursors. Dans le .cpp : la case à cocher dans le menu, la
+  mémorisation de la 1re sonde tracée, le dessin des curseurs (temporel et FFT), et le
+  déplacement à la souris (repères n° 4 et 5, prioritaires sur ceux du déclenchement).
+  Pour changer les couleurs : « static const QColor cc[2] » dans paintCursors.
+  Pour changer les positions de départ : « m_cur[2] = {0.3, 0.7} » dans ScopePanel.h.
+
+  >>> Fichier : include/ScopePanel.h   (vers la ligne 24)
+  --------------------------------------------------------------------------
+   #include <functional>
+   #include <limits>
+   
+  -class QMouseEvent; class QComboBox; class QLabel; class QPushButton; class QToolButton; class QWidget; class QVBoxLayout; class QPainter; class QLayout; class QLineEdit;
+  +class QMouseEvent; class QComboBox; class QCheckBox; class QLabel; class QPushButton; class QToolButton; class QWidget; class QVBoxLayout; class QPainter; class QLayout; class QLineEdit;
+   
+   struct ProbeInfo {
+       QString key;       // nom de la voie (cle des donnees recues)
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/ScopePanel.h   (vers la ligne 136)
+  --------------------------------------------------------------------------
+       double m_trigPos = 0;                                           // instant du front : fraction de l'ecran (0 = bord gauche)
+       QRect m_waveRect; double m_waveCy = 0, m_waveDivH = 1, m_lvlY0 = 0, m_lvlScale = 1, m_lvlMu = 0;
+       void plotMouse(QMouseEvent* e, int type);
+  +    // v59 : deux curseurs de mesure deplacables (temporel et FFT), positions en fraction de la largeur
+  +    QCheckBox* m_curBox = nullptr; bool m_curOn = false; double m_cur[2] = {0.3, 0.7}; QRect m_curRect;
+  +    void paintCursors(QPainter& p, const QRect& r, const std::function<double(double)>& xOf, const std::function<double(double)>& yOf,
+  +                      const std::function<QString(double)>& xTxt, const std::function<QString(double)>& yTxt, bool timeAxis, const QString& dyUnit, const QString& name);
+       QMap<QString, Block> m_shown; int m_shownT0 = 0; QString m_shownRef; bool m_haveShown = false; qint64 m_lastTrigMs = 0;
+   };
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 1)
+  --------------------------------------------------------------------------
+   #include "ScopePanel.h"
+   #include "Spectrum.h"
+   #include <QComboBox>
+  +#include <QCheckBox>
+   #include <QLabel>
+   #include <QPushButton>
+   #include <QToolButton>
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 226)
+  --------------------------------------------------------------------------
+       }
+       connect(m_addProbe->menu(), &QMenu::aboutToShow, this, [this]() { fillProbeMenu(); });
+       m_probeChips = chipBox(); add(m_probeChips);
+  +    // v59 : curseurs de mesure (vue temporelle et FFT ; sans effet en defilement >= 1 s/div)
+  +    m_curBox = new QCheckBox("Curseurs de mesure");
+  +    m_curBox->setToolTip("Deux curseurs verticaux C1 / C2 à déplacer à la souris : valeurs sous chaque curseur et écarts (Δt, 1/Δt, Δf, Δ niveau) sur la 1re sonde affichée.");
+  +    add(m_curBox);
+  +    connect(m_curBox, &QCheckBox::toggled, this, [this](bool on) { m_curOn = on; m_plot->update(); });
+   
+       // ---- temporelle (U/I/T et, depuis v32, hydrophones)
+       {
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 676)
+  --------------------------------------------------------------------------
+       const int t0 = ref ? startOf(ref, t0i) : 0;
+       m_waveCy = cy; m_waveDivH = divH;
+       bool unsync = false, anyData = false;
+  +    const Block* curB = nullptr; int curStart = 0; QChar curKind('V'); QString curKey;      // v59 : sonde lue par les curseurs
+       for (int s = 0; s < m_sel.size(); ++s) {
+           const QString& k = m_sel[s]; const ProbeInfo* pr = probe(k); if (!pr) continue;
+           View& v = view(k); const QColor col = colorOf(k);
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 700)
+  --------------------------------------------------------------------------
+           const int n = std::min(int(b.x.size()) - start, std::max(2, int(win * b.fs)));
+           if (n < 2) continue;
+           const double* x = b.x.constData() + start;
+  +        if (!curB) { curB = &b; curStart = start; curKind = pr->kind; curKey = k; }
+           double mu = 0; if (v.ac) { for (int i = 0; i < n; ++i) mu += x[i]; mu /= n; }
+           QRect rr = r; rr.setWidth(int(r.width() * std::min(1.0, n / (win * b.fs))));
+           p.setPen(QPen(col, 1.4));
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 733)
+  --------------------------------------------------------------------------
+       if (m_trigMode == 2 && !m_armed) st += "  ·  FIGÉ";
+       else if (held && m_lastTrigMs > 0 && QDateTime::currentMSecsSinceEpoch() - m_lastTrigMs > 2000) st += "  ·  attente du front";
+       p.drawText(r.adjusted(0, 4, -8, 0), Qt::AlignRight | Qt::AlignTop, st + (unsync ? "  ·  sondes non simultanées (modules 5108 différents)" : ""));
+  +    if (m_curOn && curB) {                                          // v59 : curseurs temporels
+  +        const Block* B = curB; const int S = curStart; const QString u = unitOf(curKind);
+  +        paintCursors(p, r, [win](double f) { return f * win; },
+  +                     [B, S, win](double f) { const int i = S + int(std::lround(f * win * B->fs)); return i >= 0 && i < B->x.size() ? B->x[i] : std::numeric_limits<double>::quiet_NaN(); },
+  +                     [](double v) { return eng(v, "s"); }, [u](double v) { return eng(v, u); }, true, u, nameOf(curKey));
+  +    }
+   }
+   
+   void ScopePanel::paintRoll(QPainter& p, const QRect& r)
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 806)
+  --------------------------------------------------------------------------
+       }
+       // legende
+       for (int s = 0; s < keys.size(); ++s) { p.setPen(colorOf(keys[s])); p.drawText(QPointF(r.right() - 120, r.top() + 14 + 13 * s), "■ " + nameOf(keys[s])); }
+  +    if (m_curOn) {                                                  // v59 : curseurs manuels (accroches a la raie la plus forte a ±2 points)
+  +        const Spec& s0 = m_specs[keys[0]]; const double df = s0.fs / s0.n; const int K = int(s0.v.size());
+  +        const ProbeInfo* p0 = probe(keys[0]); const QString u = p0 && p0->kind == 'I' ? "A" : "V";
+  +        const QString yu = m_yUnit == 2 ? u + "eff" : m_yUnit == 0 ? QString("dBm") : "dB" + u;
+  +        auto bin = [&](double f) { const int k0 = std::clamp(int(std::lround(f * span / df)), 1, K - 1); int kb = k0;
+  +            for (int k = std::max(1, k0 - 2); k <= std::min(K - 1, k0 + 2); ++k) if (s0.v[k] > s0.v[kb]) kb = k; return kb; };
+  +        paintCursors(p, r, [&](double f) { return bin(f) * df; }, [&](double f) { return toUnit(s0.v[bin(f)]); },
+  +                     [](double v) { return hz(v); }, [this, yu](double v) { return m_yUnit == 2 ? eng(v, yu) : QString("%1 %2").arg(v, 0, 'f', 2).arg(yu); },
+  +                     false, m_yUnit == 2 ? yu : QString("dB"), nameOf(keys[0]));
+  +    } else {
+       // curseurs sur la 1re sonde : deux plus fortes raies
+       const Spec& s0 = m_specs[keys[0]]; const int K = int(s0.v.size()); const double df = s0.fs / s0.n; const int kmax = std::min(K - 1, int(span / df));
+       QVector<int> peaks; for (int k = 2; k < kmax; ++k) if (s0.v[k] >= s0.v[k - 1] && s0.v[k] > s0.v[k + 1]) peaks << k;
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 821)
+  --------------------------------------------------------------------------
+           p.drawText(QPointF(r.left() + 8, r.top() + 28 + 14 * i), QString("f%1: %2   L%1: %3").arg(i + 1).arg(hz(fk))
+                      .arg(m_yUnit == 2 ? eng(val, u + "eff") : QString("%1 %2").arg(val, 0, 'f', 2).arg(m_yUnit == 0 ? "dBm" : "dB" + u)));
+       }
+  +    }   // v59 : fin du mode « deux raies automatiques »
+       p.setPen(QColor("#8b949e"));
+       p.drawText(QPointF(r.left() + 8, r.bottom() - 6), m_yUnit == 2 ? QString("haut : %1").arg(eng(top, "eff")) : QString("haut : %1 %2").arg(top, 0, 'f', 0).arg(m_yUnit == 0 ? "dBm" : "dB"));
+   }
+   
+  +// v59 : curseurs de mesure. xOf / yOf : valeurs sous un curseur place a la fraction f (0..1) de la largeur.
+  +void ScopePanel::paintCursors(QPainter& p, const QRect& r, const std::function<double(double)>& xOf, const std::function<double(double)>& yOf,
+  +                              const std::function<QString(double)>& xTxt, const std::function<QString(double)>& yTxt, bool timeAxis, const QString& dyUnit, const QString& name)
+  +{
+  +    m_curRect = r;
+  +    static const QColor cc[2] = {QColor("#ffd166"), QColor("#06d6a0")};
+  +    double xv[2], yv[2];
+  +    QFont f = p.font(); f.setPointSizeF(8.5); f.setBold(false); p.setFont(f);
+  +    for (int i = 0; i < 2; ++i) {
+  +        const double px = r.left() + m_cur[i] * r.width();
+  +        p.setPen(QPen(cc[i], 1.2, Qt::DashLine)); p.drawLine(QPointF(px, r.top()), QPointF(px, r.bottom()));
+  +        QPainterPath h; h.moveTo(px - 6, r.bottom()); h.lineTo(px + 6, r.bottom()); h.lineTo(px, r.bottom() - 9); h.closeSubpath(); p.fillPath(h, cc[i]);
+  +        p.setPen(cc[i]); p.drawText(QPointF(px + 5, r.bottom() - 11), QString("C%1").arg(i + 1));
+  +        m_hits.push_back({QRectF(px - 6, r.top(), 12, r.height()), 4 + i, QString()});
+  +        xv[i] = xOf(m_cur[i]); yv[i] = yOf(m_cur[i]);
+  +    }
+  +    QStringList lines{QString("Curseurs — %1").arg(name)};
+  +    for (int i = 0; i < 2; ++i) lines << QString("C%1 : %2    %3").arg(i + 1).arg(xTxt(xv[i]), std::isfinite(yv[i]) ? yTxt(yv[i]) : QString("—"));
+  +    const double dx = std::abs(xv[1] - xv[0]), dy = yv[1] - yv[0];
+  +    QString d = QString("Δ%1 : %2").arg(timeAxis ? "t" : "f", xTxt(dx));
+  +    if (timeAxis && dx > 0) d += QString("    1/Δt : %1").arg(hz(1.0 / dx));
+  +    if (std::isfinite(dy)) d += QString("    Δ : %1").arg(dyUnit == QLatin1String("dB") ? QString("%1 dB").arg(dy, 0, 'f', 2) : eng(dy, dyUnit));
+  +    lines << d;
+  +    const QFontMetrics fm(f); int w = 0; for (const QString& l : lines) w = std::max(w, fm.horizontalAdvance(l));
+  +    const QRectF box(r.left() + 18, r.bottom() - 22 - lines.size() * 14 - 8, w + 14, lines.size() * 14 + 8);
+  +    p.setPen(QColor("#30363d")); p.setBrush(QColor(13, 17, 23, 220)); p.drawRect(box); p.setBrush(Qt::NoBrush);
+  +    for (int i = 0; i < lines.size(); ++i) {
+  +        p.setPen(i == 1 ? cc[0] : i == 2 ? cc[1] : QColor("#e6edf3"));
+  +        p.drawText(QPointF(box.left() + 7, box.top() + 15 + 14 * i), lines[i]);
+  +    }
+  +}
+  +
+   // ============================================================================ declenchement (v32)
+   QString ScopePanel::trigSource() const
+   {
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 874)
+  --------------------------------------------------------------------------
+   {
+       const QPointF pt = e->position();
+       auto hitAt = [&](int* what, QString* key) {
+  -        for (int w : {2, 1, 3}) for (const Hit& h : m_hits) if (h.what == w && h.r.contains(pt)) { *what = h.what; *key = h.key; return true; }
+  +        for (int w : {4, 5, 2, 1, 3}) for (const Hit& h : m_hits) if (h.what == w && h.r.contains(pt)) { *what = h.what; *key = h.key; return true; }
+           return false; };
+       int what = 0; QString key;
+       if (type == 0 && e->button() == Qt::LeftButton) { if (hitAt(&what, &key)) { m_drag = what; m_dragKey = key; } return; }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ScopePanel.cpp   (vers la ligne 886)
+  --------------------------------------------------------------------------
+           m_plot->update(); return;
+       }
+       if (!m_drag) {                                                  // survol : curseur adapte
+  -        m_plot->setCursor(hitAt(&what, &key) ? (what == 1 ? Qt::SizeHorCursor : Qt::SizeVerCursor) : Qt::ArrowCursor);
+  +        m_plot->setCursor(hitAt(&what, &key) ? (what == 1 || what >= 4 ? Qt::SizeHorCursor : Qt::SizeVerCursor) : Qt::ArrowCursor);
+           return;
+       }
+  -    if (m_drag == 1 && m_waveRect.width() > 0) {
+  +    if (m_drag >= 4 && m_curRect.width() > 0) {                    // v59 : curseur C1 (4) ou C2 (5)
+  +        m_cur[m_drag - 4] = std::clamp((pt.x() - m_curRect.left()) / m_curRect.width(), 0.0, 1.0);
+  +    } else if (m_drag == 1 && m_waveRect.width() > 0) {
+           m_trigPos = std::clamp((pt.x() - m_waveRect.left()) / m_waveRect.width(), 0.0, 0.9);
+       } else if (m_drag == 2) {
+           const double lv = m_lvlMu + (m_lvlY0 - pt.y()) / m_waveDivH * m_lvlScale;
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 5 — LANCEMENT : PXIe-8301 RETIRÉ, ÉTAT OK / KO
+##############################################################################
+  isLinkModule() repère le 8301. Pour masquer aussi d'autres modules de liaison
+  (ex. 8381), ajouter :  || x.productType.contains("8381")
+
+  >>> Fichier : src/LoginWindow.cpp   (vers la ligne 122)
+  --------------------------------------------------------------------------
+       finishFail("NI-DAQmx ne répond pas (NI MAX voit-il le châssis ?)");
+   }
+   
+  +// v59 : modules de liaison PC <-> chassis (pas des instruments) : non affiches au lancement
+  +static bool isLinkModule(const NiDevice& x) { return x.productType.contains("8301"); }
+  +
+   static QString roleOf(const QString& model)
+   {
+       if (model.contains("4353")) return "Températures";
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/LoginWindow.cpp   (vers la ligne 136)
+  --------------------------------------------------------------------------
+   
+   void LoginWindow::fillDevices(const QVector<NiDevice>& d)
+   {
+  -    QVector<NiDevice> v = d;
+  +    QVector<NiDevice> v; for (const auto& x : d) if (!isLinkModule(x)) v << x;          // v59 : sans le PXIe-8301
+       auto rank = [](const NiDevice& x) { if (x.productType.contains("4353")) return 0; if (x.productType.contains("4480")) return 1; if (x.productType.contains("5108")) return 2;
+           if (x.productType.contains("5413")) return 3; if (x.productType.contains("6537") || x.productType.contains("6570")) return 4; if (x.productType.contains("6528")) return 5; return 6; };
+       std::stable_sort(v.begin(), v.end(), [&](const NiDevice& a, const NiDevice& b) { return rank(a) < rank(b); });
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/LoginWindow.cpp   (vers la ligne 144)
+  --------------------------------------------------------------------------
+       for (int r = 0; r < v.size(); ++r) {
+           const NiDevice& x = v[r];
+           const QStringList cells = {x.productType.isEmpty() ? "(inconnu)" : x.productType, roleOf(x.productType), x.driver,
+  -                                   x.name, x.ok ? (x.status.isEmpty() ? "Détecté" : x.status) : x.status.left(60)};
+  +                                   x.name, x.ok ? QStringLiteral("OK") : QStringLiteral("KO")};      // v59 : etat harmonise OK / KO
+           for (int c = 0; c < cells.size(); ++c) {
+  -            auto* it = new QTableWidgetItem(c == 4 ? (x.ok ? "●  " : "✗  ") + cells[c] : cells[c]);
+  -            if (c == 4) it->setForeground(QColor(x.ok ? "#00e676" : "#ff4444"));
+  +            auto* it = new QTableWidgetItem(cells[c]);
+  +            if (c == 4) { it->setForeground(QColor(x.ok ? "#00e676" : "#ff4444")); QFont f = it->font(); f.setBold(true); it->setFont(f); }
+               if (c == 0) { QFont f = it->font(); f.setBold(true); it->setFont(f); it->setForeground(QColor("#00d4ff")); }
+               t->setItem(r, c, it);
+           }
+       }
+       t->resizeRowsToContents();
+  -    for (int r = 0; r < v.size(); ++r) t->item(r, 4)->setToolTip(v[r].status + (v[r].serial.isEmpty() ? QString() : "\nS/N " + v[r].serial));
+  +    for (int r = 0; r < v.size(); ++r) t->item(r, 4)->setToolTip((v[r].status.isEmpty() ? QString("Détecté") : v[r].status) + (v[r].serial.isEmpty() ? QString() : "\nS/N " + v[r].serial));   // detail au survol
+       ui->secDevices->setVisible(true); t->setVisible(true);
+       fitToContent();
+   }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/LoginWindow.cpp   (vers la ligne 163)
+  --------------------------------------------------------------------------
+       if (!m_waiting) return;
+       m_waiting = false; m_timeout->stop();
+       ui->progressBar->setValue(80); ui->lblProgressPct->setText("80%");
+  -    for (const auto& x : d) addStep(QString("%1 : %2 (%3)").arg(x.name, x.productType, x.driver), x.ok);
+  +    for (const auto& x : d) if (!isLinkModule(x)) addStep(QString("%1 : %2 (%3)").arg(x.name, x.productType, x.driver), x.ok);   // v59 : sans le 8301
+       fillDevices(d);
+       if (d.isEmpty()) { addStep("Aucune carte NI détectée", false); finishFail("Aucune carte NI détectée — vérifier la liaison PXIe-8301 / NI MAX"); return; }
+   
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 6 — SUPERVISION + CONFIGURATION AU LANCEMENT
+##############################################################################
+  main.cpp demande l'ouverture de la Configuration juste après l'affichage de la
+  Supervision. Pour revenir à l'ancien comportement : supprimer la ligne QTimer::singleShot.
+  (La fonction showConfigAtStart est dans le bloc commun aux points 6 et 7, plus bas.)
+
+  >>> Fichier : src/main.cpp   (vers la ligne 1)
+  --------------------------------------------------------------------------
+   #include <QApplication>
+   #include "LoginWindow.h"
+  +#include <QTimer>
+   #include "MainWindow.h"
+   #include "HardwareManager.h"
+   #include "StyleManager.h"
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/main.cpp   (vers la ligne 49)
+  --------------------------------------------------------------------------
+       MainWindow mainWin(cfg, &hw);
+       mainWin.setStyleSheet(StyleManager::instance().mainStyleSheet());
+       mainWin.showMaximized();
+  +    QTimer::singleShot(0, &mainWin, &MainWindow::showConfigAtStart);   // v59 : Configuration affichee des le lancement
+       return app.exec();
+   }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/MainWindow.h   (vers la ligne 35)
+  --------------------------------------------------------------------------
+       ~MainWindow();
+   public slots:
+       void toggleTheme();
+  +    void showConfigAtStart();                                          // v59 : Configuration ouverte au lancement
+   protected:
+       void closeEvent(QCloseEvent* e) override;
+   private slots:
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 7 — GESTION DE LA BASE DANS LA SUPERVISION
+##############################################################################
+  ConfigWindow ne met plus la page dans l'arborescence et la prête à la Supervision
+  (dbManagerPage). MainWindow l'ouvre dans une fenêtre : bouton « 🗄 BASE », menu Outils,
+  et bouton « Gérer la base… » de la page Banc. La page est relue à chaque ouverture.
+
+  >>> Fichier : include/ConfigWindow.h   (vers la ligne 30)
+  --------------------------------------------------------------------------
+       struct AbOutput { int amp = 0; QVector<float> x; double fs = 0; QString channel; bool highZ = true; double peak = 0; };
+       bool buildAnalogOutputs(QList<AbOutput>* outs, QString* err, const QSet<int>& only = {});   // only : amplis retenus (vide = tous)
+       class ScenarioSeqPage* scenarioPage() const { return m_scenSeq; }   // v58
+  +    class DbManagerPage* dbManagerPage() const { return m_dbMgr; }      // v59 : affichee depuis la Supervision
+       int ampCount() const;
+       // v51 : trames MLI (PXIe-6537) d'un signal de mesure x (normalise, cadence fs) avec les reglages MLI de l'ampli ampId (classe D).
+       // Le WAV de la configuration est remplace par x ; filtre applique seulement si applyFilter. carrierHz = frequence de decoupage.
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/ConfigWindow.h   (vers la ligne 52)
+  --------------------------------------------------------------------------
+       void analogOutputStopRequested(const QString& why);
+       void analogTransportRequested(int ampId, const QString& action);   // Play / Pause / Stop de l'onglet Live (classe AB)
+       void hardwareMappingChanged();
+  +    void dbManagerRequested();                                         // v59 : bouton « Gérer la base… » de la page Banc
+   
+   private slots:
+       void onValidate();
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ConfigWindow.cpp   (vers la ligne 174)
+  --------------------------------------------------------------------------
+       // v45 : gestion guidee des catalogues de Test.db (equivalent « Outils > Mon parc » de l'IHM Python)
+       m_dbMgr = new DbManagerPage([this]() { return m_bench->dbPath(); });
+       connect(m_dbMgr, &DbManagerPage::catalogChanged, this, [this]() { loadCatalog(m_bench->dbPath(), true); scheduleValidation(); });
+  -    QTreeWidgetItem* dbItem = addItem(m_benchItem, "Gestion de la base", m_dbMgr);
+  +    // v59 : « Gestion de la base » n'est plus dans l'arborescence : elle s'ouvre depuis la Supervision (bouton BASE)
+       m_benchItem->setExpanded(true);                                   // v46 : visible sans deplier
+  -    connect(m_bench, &BenchPage::manageDbRequested, this, [this, dbItem]() { gotoItem(dbItem); });
+  +    connect(m_bench, &BenchPage::manageDbRequested, this, &ConfigWindow::dbManagerRequested);
+       connect(m_bench, &BenchPage::catalogPathChosen, m_dbMgr, [this]() { m_dbMgr->reload(); });
+       // La section des equipements est creee d'abord vide ; ses liens sont regeneres a chaque synchronisation.
+       m_equipItem = addItem(nullptr, "Réglages des équipements", new SectionPage("Réglages des équipements", "", {}));
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/MainWindow.h   (vers la ligne 65)
+  --------------------------------------------------------------------------
+       void watchdog();
+       void exportCSV();
+       void openReplay();
+  +    void openDbManager();                                              // v59 : Gestion de la base (deplacee depuis la Configuration)
+       void openMeasure();
+       void toggleRecording(bool on);
+       void showDiagnostic();
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/MainWindow.h   (vers la ligne 133)
+  --------------------------------------------------------------------------
+       QMap<int, QVector<float>> m_lastAb; QMap<int, double> m_lastAbFs;
+       void recEvent(const QString& type, const QString& detail = QString());
+       ReplayWindow* m_replay = nullptr;
+  +    class QDialog* m_dbDlg = nullptr;                                  // v59
+       MeasureWindow* m_measure = nullptr;
+       BinFile::Writer* m_rec = nullptr;
+       QString recordsDir() const;
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 8)
+  --------------------------------------------------------------------------
+   #include "MeasureWindow.h"
+   #include "ConfigWindow.h"
+   #include "ReplayWindow.h"
+  +#include "DbManagerPage.h"
+   #include "BinFile.h"
+   #include "TransfoAnalysis.h"
+   #include <cmath>
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 57)
+  --------------------------------------------------------------------------
+   
+       // Fenetre de configuration unique (creee masquee : sa configuration pilote le materiel)
+       m_configWindow = new ConfigWindow(nullptr);
+  +    connect(m_configWindow, &ConfigWindow::dbManagerRequested, this, &MainWindow::openDbManager);   // v59
+       m_configWindow->setStyleSheet(StyleManager::instance().configStyleSheet());
+       m_configWindow->setAttribute(Qt::WA_DeleteOnClose, false);
+       connect(m_configWindow, &ConfigWindow::configChanged,        this, &MainWindow::onConfigChanged);
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 198)
+  --------------------------------------------------------------------------
+       connect(mTools->addAction("Calibration (auto-calibration NI)"), &QAction::triggered, m_hw, &HardwareManager::selfCalibrate);
+       connect(mTools->addAction("Diagnostic matériel"), &QAction::triggered, this, &MainWindow::showDiagnostic);
+       connect(mTools->addAction("Configuration..."), &QAction::triggered, this, &MainWindow::openConfig);
+  +    connect(mTools->addAction("Gestion de la base..."), &QAction::triggered, this, &MainWindow::openDbManager);   // v59
+       connect(mTools->addAction("Analyse..."), &QAction::triggered, this, &MainWindow::openReplay);     // v32 : comme le bouton ANALYSE
+       connect(mTools->addAction("Mesures..."), &QAction::triggered, this, &MainWindow::openMeasure);    // v32 : comme le bouton MESURE
+   
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 284)
+  --------------------------------------------------------------------------
+       mesBtn->setToolTip("Mesures du transducteur (TVR, TPR, Urms, Irms, cos φ), d'après la configuration");
+       connect(mesBtn, &QPushButton::clicked, this, &MainWindow::openMeasure);
+       tb->addWidget(mesBtn);
+  +    auto* dbBtn = new QPushButton("🗄  BASE"); dbBtn->setFixedHeight(30); dbBtn->setMinimumWidth(90);      // v59
+  +    dbBtn->setToolTip("Gestion de la base (Test.db) : sondes, hydrophones, amplis…");
+  +    connect(dbBtn, &QPushButton::clicked, this, &MainWindow::openDbManager);
+  +    tb->addWidget(dbBtn);
+       auto* cfgBtn = new QPushButton("⚙  CONFIG"); cfgBtn->setProperty("cssClass", "primary");
+       cfgBtn->setFixedHeight(30); cfgBtn->setMinimumWidth(100);
+       connect(cfgBtn, &QPushButton::clicked, this, &MainWindow::openConfig);
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINTS 6 ET 7 — BLOC COMMUN (MainWindow.cpp)
+##############################################################################
+  Ce bloc contient showConfigAtStart (point 6), openDbManager (point 7) et le thème clair/sombre
+  appliqué aussi à la fenêtre de la base.
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 593)
+  --------------------------------------------------------------------------
+       m_configWindow->show(); m_configWindow->raise(); m_configWindow->activateWindow();
+   }
+   
+  +// v59 : au lancement, la Supervision (plein ecran) et la Configuration (au premier plan) sont affichees ensemble
+  +void MainWindow::showConfigAtStart() { openConfig(); }
+  +
+  +// v59 : Gestion de la base, deplacee de la Configuration vers la Supervision (bouton BASE, menu Outils)
+  +void MainWindow::openDbManager()
+  +{
+  +    if (!m_configWindow || !m_configWindow->dbManagerPage()) return;
+  +    if (!m_dbDlg) {
+  +        m_dbDlg = new QDialog(this, Qt::Window);
+  +        m_dbDlg->setWindowTitle("ACOUSTIMETER — Gestion de la base");
+  +        m_dbDlg->setStyleSheet(StyleManager::instance().configStyleSheet());
+  +        auto* l = new QVBoxLayout(m_dbDlg); l->setContentsMargins(8, 8, 8, 8);
+  +        l->addWidget(m_configWindow->dbManagerPage());           // la page change de parent (elle a sa propre zone defilante)
+  +        m_dbDlg->resize(1100, 780);
+  +    }
+  +    m_configWindow->dbManagerPage()->reload();
+  +    m_dbDlg->show(); m_dbDlg->raise(); m_dbDlg->activateWindow();
+  +}
+  +
+   void MainWindow::toggleTheme()
+   {
+       auto& sm = StyleManager::instance();
+       sm.setTheme(sm.isDark() ? StyleManager::Light : StyleManager::Dark);
+       setStyleSheet(sm.mainStyleSheet());
+       if (m_configWindow) m_configWindow->setStyleSheet(sm.configStyleSheet());
+  +    if (m_dbDlg) m_dbDlg->setStyleSheet(sm.configStyleSheet());     // v59
+       update();
+   }
+   
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 8 — ARRÊT D'URGENCE RETIRÉ DE LA BARRE
+##############################################################################
+  Les trois lignes du bouton sont supprimées. Le menu « Acquisition › ARRÊT D'URGENCE »
+  reste. OPTION (non appliquée) : raccourci clavier, dans setupMenuBar, remplacer
+      connect(mAcq->addAction("ARRÊT D'URGENCE"), ...
+  par
+      auto* au = mAcq->addAction("ARRÊT D'URGENCE"); au->setShortcut(QKeySequence("F12"));
+      connect(au, &QAction::triggered, this, &MainWindow::emergencyStop);
+
+  >>> Fichier : src/MainWindow.cpp   (vers la ligne 247)
+  --------------------------------------------------------------------------
+           appendLog(on ? "warn" : "info", on ? "Émission : mode test oscilloscope SANS ampli sous tension (surveillance thermique ignorée)" : "Émission : surveillance thermique de nouveau exigée"); });
+       tb->addWidget(m_noAmpCheck);
+   
+  -    auto* stop = new QPushButton("⛔  ARRÊT D'URGENCE"); stop->setProperty("cssClass", "danger");
+  -    stop->setFixedHeight(30); connect(stop, &QPushButton::clicked, this, &MainWindow::emergencyStop);
+  -    tb->addWidget(stop);
+  +    // v59 : bouton « ARRÊT D'URGENCE » retire de l'ecran Supervision (reste dans le menu Acquisition)
+       m_recButton = new QPushButton; m_recButton->setFixedHeight(30); m_recButton->setMinimumWidth(150);      // SAVE-TRIG
+       connect(m_recButton, &QPushButton::clicked, this, [this]() {
+           if (m_rec || m_recArmed) { stopRecordingNow(m_rec ? QString("arrêt manuel") : QString("armement annulé")); return; }
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 9 — ZOOM SUR L'APERÇU DU SIGNAL
+##############################################################################
+  MliScope reçoit la molette et la souris et prévient la page MLI, qui change les champs
+  « Début » et « Fenêtre » (donc le zoom suit les limites existantes : 0,01 à 50 ms).
+  Pendant la lecture, seul le zoom (fenêtre) est actif ; le déplacement est bloqué.
+
+  >>> Fichier : include/MliScope.h   (vers la ligne 2)
+  --------------------------------------------------------------------------
+   // Trois volets synchronises sur l'axe du temps : signal (+ filtre, porteuses), trames par voie MLI, reponse du pont.
+   #include "MliSim.h"
+   #include <QWidget>
+  +#include <functional>
+   
+   class MliScope : public QWidget
+   {
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/MliScope.h   (vers la ligne 10)
+  --------------------------------------------------------------------------
+       void setResult(const MliSimResult& r, const QStringList& laneLabels);
+       void setMessage(const QString& m);
+       QSize sizeHint() const override { return {720, 560}; }
+  +    // v59 : zoom a la souris. onZoom(facteur, ancre) : facteur < 1 = zoom avant, ancre = position de la souris (0..1 de la largeur)
+  +    //       onPan(decalage) : glisser, en fraction de la largeur (positif = vers la droite) ; onReset : double-clic
+  +    std::function<void(double, double)> onZoom;
+  +    std::function<void(double)> onPan;
+  +    std::function<void()> onReset;
+   protected:
+       void paintEvent(QPaintEvent*) override;
+  +    void wheelEvent(QWheelEvent* e) override;
+  +    void mousePressEvent(QMouseEvent* e) override;
+  +    void mouseMoveEvent(QMouseEvent* e) override;
+  +    void mouseReleaseEvent(QMouseEvent* e) override;
+  +    void mouseDoubleClickEvent(QMouseEvent* e) override;
+   private:
+  +    double frac(double x) const;                 // position x -> fraction de la zone des courbes
+       MliSimResult m_r; QStringList m_labels; QString m_msg;
+  +    bool m_drag = false; double m_lastX = 0;
+   };
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/MliScope.cpp   (vers la ligne 1)
+  --------------------------------------------------------------------------
+   #include "MliScope.h"
+   #include <QPainter>
+  +#include <QWheelEvent>
+  +#include <QMouseEvent>
+   #include <QPolygonF>
+   #include <cmath>
+   #include <algorithm>
+   
+  -MliScope::MliScope(QWidget* p) : QWidget(p) { setMinimumHeight(420); }
+  +MliScope::MliScope(QWidget* p) : QWidget(p) { setMinimumHeight(420); setToolTip("Molette : zoom (fenêtre) · glisser : déplacer · double-clic : fenêtre de 2 ms"); }
+  +
+  +// v59 : zoom / deplacement a la souris (la zone des courbes va de x = 232 a largeur - 12, comme dans paintEvent)
+  +double MliScope::frac(double x) const { const double L = 232, R = 12, w = std::max(1.0, width() - L - R); return std::clamp((x - L) / w, 0.0, 1.0); }
+  +void MliScope::wheelEvent(QWheelEvent* e)
+  +{
+  +    if (!m_r.ok || !onZoom) return;
+  +    onZoom(e->angleDelta().y() > 0 ? 0.8 : 1.25, frac(e->position().x())); e->accept();
+  +}
+  +void MliScope::mousePressEvent(QMouseEvent* e) { if (e->button() == Qt::LeftButton && m_r.ok) { m_drag = true; m_lastX = e->position().x(); setCursor(Qt::ClosedHandCursor); } }
+  +void MliScope::mouseMoveEvent(QMouseEvent* e)
+  +{
+  +    if (!m_drag || !onPan) return;
+  +    const double L = 232, R = 12, w = std::max(1.0, width() - L - R), dx = e->position().x() - m_lastX;
+  +    if (std::abs(dx) < 2) return;
+  +    m_lastX = e->position().x(); onPan(dx / w);
+  +}
+  +void MliScope::mouseReleaseEvent(QMouseEvent*) { m_drag = false; unsetCursor(); }
+  +void MliScope::mouseDoubleClickEvent(QMouseEvent*) { if (onReset) onReset(); }
+   void MliScope::setResult(const MliSimResult& r, const QStringList& labels)
+   {
+       m_r = r; m_labels = labels; m_msg.clear();
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINTS 1 ET 9 — BLOC COMMUN (MliPages.cpp, aperçu de l'ampli)
+##############################################################################
+  Ce bloc contient le branchement du zoom (point 9) et le bouton unique Lecture/Pause (point 1).
+
+  >>> Fichier : src/MliPages.cpp   (vers la ligne 316)
+  --------------------------------------------------------------------------
+       m_pos = new QSlider(Qt::Horizontal); m_pos->setRange(0, 10000); vl->addWidget(m_pos);
+       m_status = new QLabel; m_status->setWordWrap(true); m_status->setStyleSheet("color:#8b949e;"); vl->addWidget(m_status);
+       m_scope = new MliScope; vl->addWidget(m_scope); m_lay->addWidget(vg);
+  +    // v59 : zoom a la souris sur l'apercu : la molette change la fenetre autour du point vise, glisser deplace le debut
+  +    m_scope->onZoom = [this](double k, double a) {
+  +        const double d0 = m_dur->value(), d1 = std::clamp(d0 * k, m_dur->minimum(), m_dur->maximum());
+  +        if (!m_playing) { const double t = m_t0->value() + a * d0; QSignalBlocker b(m_t0); m_t0->setValue(std::max(0.0, t - a * d1)); }
+  +        m_dur->setValue(d1); scheduleRender(); };
+  +    m_scope->onPan = [this](double f) { if (m_playing) return; m_t0->setValue(std::max(0.0, m_t0->value() - f * m_dur->value())); };
+  +    m_scope->onReset = [this]() { m_dur->setValue(2.0); scheduleRender(); };
+       m_timer.setInterval(33); m_debounce.setSingleShot(true); m_debounce.setInterval(90);
+       connect(&m_timer, &QTimer::timeout, this, &MliVoicesPage::tick);
+       connect(&m_debounce, &QTimer::timeout, this, &MliVoicesPage::renderView);
+  -    connect(m_play, &QPushButton::clicked, this, &MliVoicesPage::play);
+  -    connect(m_pause, &QPushButton::clicked, this, &MliVoicesPage::pausePlay);
+  +    // v59 : un seul bouton Lecture / Pause (m_pause est garde mais masque)
+  +    connect(m_play, &QPushButton::clicked, this, [this]() { if (m_playing) pausePlay(); else play(); });
+  +    m_pause->hide();
+       connect(m_stop, &QPushButton::clicked, this, &MliVoicesPage::stopPlay);
+       connect(m_t0, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() { if (!m_playing) scheduleRender(); });
+       connect(m_dur, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this]() { scheduleRender(); });
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 10 — CLASSE AB : TENSION LIMITÉE + MESSAGE
+##############################################################################
+  AnalogModel : nouvelle valeur entreeMax (« 12 » par défaut, enregistrée sous la clé
+  entree_ampli_max_vcc) et maxAllowedVpp(). AnalogPages : nouveau champ, limitation à la
+  fin de la saisie (et au changement de charge), message orange, contrôle avant lecture.
+  Pour changer la valeur par défaut : les deux "12" de AnalogModel (reset et fromJson)
+  et celui de AnalogModel.h.
+
+  >>> Fichier : include/AnalogModel.h   (vers la ligne 19)
+  --------------------------------------------------------------------------
+       explicit AnalogModel(QObject* parent = nullptr);
+       MliModel* src;                    // WAV, filtre et canal du parcours AB (meme moteur que le parcours MLI)
+       QString voie, charge, amplitude, niveau, gain;
+  +    QString entreeMax = "12";         // v59 : tension max admissible a l'entree de l'ampli externe (Vcc)
+       bool externe = false;             // ampli externe present
+       bool locked = false;              // Play / Pause : charge et amplitude de reference verrouillees
+   
+       bool hasSettings() const;         // le parcours a-t-il deja des reglages ? (reprise WAV/filtre au changement de classe)
+       double maxVpp() const { return charge.startsWith("50") ? 12.0 : 24.0; }
+  +    // v59 : amplitude maximale autorisee = limite du PXIe-5413 pour la charge, et limite d'entree de l'ampli externe s'il est present
+  +    double maxAllowedVpp() const;
+       double externalGain() const;      // rapport de tension effectif (x1 si l'ampli est decoche)
+       // Canal choisi, filtre applique, divise par son pic absolu : [-1 ; +1]. Faux + message si impossible.
+       bool prepared(QVector<float>* x, double* fs, QString* err) const;
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogModel.cpp   (vers la ligne 14)
+  --------------------------------------------------------------------------
+   
+   void AnalogModel::reset()
+   {
+  -    src->reset(); voie.clear(); charge = analogLoads().first(); amplitude = "2"; niveau = "100"; gain = "0"; externe = false; locked = false;
+  +    src->reset(); voie.clear(); charge = analogLoads().first(); amplitude = "2"; niveau = "100"; gain = "0"; externe = false; locked = false; entreeMax = "12";
+   }
+   bool AnalogModel::hasSettings() const { return !src->wavPath.isEmpty() || src->filter.def.valid() || !voie.isEmpty(); }
+  +double AnalogModel::maxAllowedVpp() const
+  +{
+  +    double m = maxVpp(), e = 0;
+  +    if (externe && num(entreeMax, &e) && e > 0) m = std::min(m, e);
+  +    return m;
+  +}
+   double AnalogModel::externalGain() const { double g; return (externe && num(gain, &g)) ? std::pow(10.0, g / 20.0) : 1.0; }
+   
+   bool AnalogModel::prepared(QVector<float>* x, double* fs, QString* err) const
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogModel.cpp   (vers la ligne 38)
+  --------------------------------------------------------------------------
+   QJsonObject AnalogModel::toJson() const
+   {
+       QJsonObject o{{"voie", voie}, {"canal", src->preview.value("canal", "1")}, {"filtre", filterToJson(src->filter)}, {"charge", charge},
+  -                  {"amplitude_vpp", amplitude}, {"niveau_pc", niveau}, {"ampli_externe_present", externe}, {"gain_ampli_db", gain}};
+  +                  {"amplitude_vpp", amplitude}, {"niveau_pc", niveau}, {"ampli_externe_present", externe}, {"gain_ampli_db", gain},
+  +                  {"entree_ampli_max_vcc", entreeMax}};                // v59
+       if (!src->wavPath.isEmpty()) o["fichier_wav"] = src->wavPath;
+       return o;
+   }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogModel.cpp   (vers la ligne 47)
+  --------------------------------------------------------------------------
+       reset();
+       voie = o["voie"].toString(); charge = o["charge"].toString(analogLoads().first()); amplitude = o["amplitude_vpp"].toString("2");
+       niveau = o["niveau_pc"].toString("100"); gain = o["gain_ampli_db"].toString("0");
+  -    externe = o["ampli_externe_present"].toBool(false);               // champ absent : false, sans deduire la presence du gain
+  +    externe = o["ampli_externe_present"].toBool(false);
+  +    entreeMax = o["entree_ampli_max_vcc"].toString("12");              // v59 : absent dans les anciennes configurations -> 12 Vcc               // champ absent : false, sans deduire la presence du gain
+       src->preview["canal"] = o["canal"].toString("1");
+       if (o.contains("filtre")) src->filter = filterFromJson(o["filtre"].toObject());
+       const QString path = o["fichier_wav"].toString();
+  --------------------------------------------------------------------------
+
+  >>> Fichier : include/AnalogPages.h   (vers la ligne 33)
+  --------------------------------------------------------------------------
+   private:
+       void write(); void readFromModel(); void updateChoices(); void updateInfo();
+       int m_amp; AnalogModel* m_m; ChannelRegistry* m_reg; QString m_owner; bool m_busy = false, m_active = false;
+  -    QComboBox *m_voie, *m_canal, *m_charge; QLineEdit *m_amplitude, *m_gain; QCheckBox* m_ext; QLabel *m_info, *m_limit;
+  +    QComboBox *m_voie, *m_canal, *m_charge; QLineEdit *m_amplitude, *m_gain, *m_extMax = nullptr; QCheckBox* m_ext; QLabel *m_info, *m_limit;
+  +    QString m_clampMsg;                  // v59 : message apres limitation de l amplitude
+   };
+   
+   class AnalogLivePage : public Ui::ConfigPage {
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 48)
+  --------------------------------------------------------------------------
+       m_ext = new QCheckBox("Ampli externe présent"); m_gain = new QLineEdit;
+       auto* g2 = new QGroupBox("Ampli externe (déclaratif)"); auto* l2 = new QVBoxLayout(g2); l2->setContentsMargins(12, 8, 12, 10);
+       l2->addWidget(Ui::hint("La présence physique et le gain sont distincts. Décoché : gain effectif ×1 (le gain saisi est conservé). Le gain externe ne change pas la tension demandée au PXI : il sert à estimer la tension après amplification."));
+  -    l2->addWidget(m_ext); l2->addWidget(Ui::fieldLabel("Gain en tension (dB) — G = 10^(dB/20)")); l2->addWidget(m_gain); l2->addStretch();
+  +    l2->addWidget(m_ext); l2->addWidget(Ui::fieldLabel("Gain en tension (dB) — G = 10^(dB/20)")); l2->addWidget(m_gain);
+  +    m_extMax = new QLineEdit;                                            // v59
+  +    l2->addWidget(Ui::fieldLabel("Tension max admissible à l’entrée de l’ampli (Vcc)")); l2->addWidget(m_extMax); l2->addStretch();
+       cols->addWidget(g2, 1);
+       m_info = new QLabel; m_info->setWordWrap(true); m_info->setStyleSheet("color:#00e676;"); m_lay->addWidget(m_info);
+       m_lay->addWidget(Ui::hint("« Pleine échelle » : le canal du WAV (filtré) est divisé par son pic absolu pour tenir dans [−1 ; +1] ; la tension vaut ce signal × (amplitude / 2) × niveau Live. La composante continue du WAV n’est pas retirée. L’estimation après ampli suppose un gain constant et linéaire (ni saturation, ni bande passante, ni limites de puissance).")); m_lay->addStretch();
+       for (QComboBox* c : {m_voie, m_canal, m_charge}) connect(c, &QComboBox::activated, this, [this]() { write(); emit modified(); });
+  -    for (QLineEdit* e : {m_amplitude, m_gain}) connect(e, &QLineEdit::textEdited, this, [this]() { write(); emit modified(); });
+  +    for (QLineEdit* e : {m_amplitude, m_gain, m_extMax}) connect(e, &QLineEdit::textEdited, this, [this]() { write(); emit modified(); });
+  +    // v59 : une amplitude au-dessus du maximum est ramenee au maximum, avec un message
+  +    auto clampAmp = [this]() {
+  +        double A = 0; if (!numOk(m_amplitude->text(), &A)) return;
+  +        const double mx = m_m->maxAllowedVpp();
+  +        if (A <= mx + 1e-9) { m_clampMsg.clear(); updateInfo(); return; }
+  +        m_amplitude->setText(QString::number(mx, 'g', 6));
+  +        const bool byAmp = m_m->externe && mx < m_m->maxVpp() - 1e-9;
+  +        m_clampMsg = byAmp ? QString("Amplitude ramenée à %1 Vcc : tension maximale admissible à l’entrée de l’ampli externe.").arg(mx, 0, 'g', 6)
+  +                           : QString("Amplitude ramenée à %1 Vcc : maximum du PXIe-5413 pour la charge « %2 ».").arg(mx, 0, 'g', 6).arg(m_m->charge);
+  +        write(); emit modified(); };
+  +    connect(m_amplitude, &QLineEdit::editingFinished, this, clampAmp);
+  +    connect(m_extMax, &QLineEdit::editingFinished, this, clampAmp);
+  +    connect(m_charge, &QComboBox::activated, this, clampAmp);
+       connect(m_ext, &QCheckBox::toggled, this, [this]() { write(); emit modified(); });
+       connect(m_reg, &ChannelRegistry::changed, this, [this]() { if (!m_busy) updateChoices(); });
+       connect(m_m, &AnalogModel::changed, this, [this]() { if (!m_busy) { updateInfo(); } });
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 81)
+  --------------------------------------------------------------------------
+       if (!w.ok) ch = QStringList{m_m->src->preview.value("canal", "1")};
+       Ui::setComboItems(m_canal, ch); Ui::setComboValue(m_canal, m_m->src->preview.value("canal", "1"));
+       Ui::setComboValue(m_charge, m_m->charge);
+  -    m_amplitude->setText(m_m->amplitude); m_gain->setText(m_m->gain);
+  +    m_amplitude->setText(m_m->amplitude); m_gain->setText(m_m->gain); m_extMax->setText(m_m->entreeMax);
+       { QSignalBlocker b(m_ext); m_ext->setChecked(m_m->externe); }
+       m_busy = false; updateChoices(); updateInfo();
+   }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 89)
+  --------------------------------------------------------------------------
+   {
+       if (m_busy) return;
+       m_m->voie = m_voie->currentText(); m_m->src->preview["canal"] = m_canal->currentText(); m_m->charge = m_charge->currentText();
+  -    m_m->amplitude = m_amplitude->text(); m_m->gain = m_gain->text(); m_m->externe = m_ext->isChecked();
+  +    m_m->amplitude = m_amplitude->text(); m_m->gain = m_gain->text(); m_m->externe = m_ext->isChecked(); m_m->entreeMax = m_extMax->text();
+       if (m_active) publish(true);
+       m_busy = true; m_m->touch(); m_busy = false; updateInfo();
+   }
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 97)
+  --------------------------------------------------------------------------
+   {
+       const bool lock = m_m->locked;
+       m_charge->setEnabled(!lock); m_amplitude->setEnabled(!lock); m_voie->setEnabled(!lock);
+  -    m_gain->setEnabled(m_ext->isChecked());
+  -    m_limit->setText(QString("Limites proposées : 12 Vcc sur 50 Ω ; 24 Vcc à vide (offset 0 V). Charge actuelle : %1 → maximum %2 Vcc.%3")
+  -        .arg(m_m->charge).arg(m_m->maxVpp()).arg(lock ? " Verrouillé pendant la lecture : faire Stop dans l’onglet Live pour modifier." : ""));
+  +    m_gain->setEnabled(m_ext->isChecked()); m_extMax->setEnabled(m_ext->isChecked());
+  +    QString lim = QString("Limites du PXIe-5413 : 12 Vcc sur 50 Ω ; 24 Vcc à vide (offset 0 V). Charge actuelle : %1 → maximum %2 Vcc.").arg(m_m->charge).arg(m_m->maxVpp());
+  +    if (m_m->externe) lim += QString(" Ampli externe : entrée admissible %1 Vcc → amplitude limitée à %2 Vcc.").arg(m_m->entreeMax).arg(m_m->maxAllowedVpp());   // v59
+  +    if (lock) lim += " Verrouillé pendant la lecture : faire Stop dans l’onglet Live pour modifier.";
+  +    if (!m_clampMsg.isEmpty()) lim += "\n⚠ " + m_clampMsg;
+  +    m_limit->setStyleSheet(m_clampMsg.isEmpty() ? "color:#8b949e;font-size:12px;" : "color:#ffb347;font-size:12px;");
+  +    m_limit->setText(lim);
+       double A = 0, lvl = 100, g = 0; const bool ok = numOk(m_m->amplitude, &A) && A > 0; numOk(m_m->niveau, &lvl);
+       if (!ok) { m_info->setText(""); return; }
+       const double pxi = A * lvl / 100.0;
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/AnalogPages.cpp   (vers la ligne 119)
+  --------------------------------------------------------------------------
+       if (!analogLoads().contains(m_m->charge)) return h + "choisissez la charge vue par le PXI.";
+       double A; if (!numOk(m_m->amplitude, &A) || A <= 0) return h + "l’amplitude de référence doit être un nombre positif (Vcc).";
+       if (A > m_m->maxVpp() + 1e-9) return h + QString("amplitude limitée à %1 Vcc pour cette charge.").arg(m_m->maxVpp());
+  +    if (A > m_m->maxAllowedVpp() + 1e-9) return h + QString("amplitude limitée à %1 Vcc : tension maximale admissible à l’entrée de l’ampli externe.").arg(m_m->maxAllowedVpp());   // v59
+  +    double em; if (m_m->externe && (!numOk(m_m->entreeMax, &em) || em <= 0)) return h + "la tension max admissible de l’ampli externe doit être un nombre positif (Vcc).";
+       double l; if (!numOk(m_m->niveau, &l) || l < 0 || l > 100) return h + "le niveau Live doit être compris entre 0 et 100 %.";
+       double g; if (m_m->externe && !numOk(m_m->gain, &g)) return h + "le gain de l’ampli externe doit être un nombre fini (dB).";
+       return QString();
+  --------------------------------------------------------------------------
+
+
+##############################################################################
+# POINT 12 — DÉBLOCAGE DE LA PWM MULTINIVEAUX (capture)
+##############################################################################
+  Deux contrôles acceptent maintenant « PWM multiniveaux » : la génération (generationBlocker)
+  et la mesure en classe D (buildMliBurst). Le calcul des trames existait déjà.
+
+  >>> Fichier : src/ConfigWindow.cpp   (vers la ligne 689)
+  --------------------------------------------------------------------------
+       const QString e = a.cfg->validate(); if (!e.isEmpty()) return e;
+       if (a.mli->wavPath.isEmpty()) return "Aucun fichier WAV chargé (étape 1).";
+       if (!a.mli->wav.ok) return "Le fichier WAV est illisible sur ce poste (étape 1).";
+  -    if (v.value("modulation") != "PWM")
+  -        return QString("La modulation « %1 » n’est pas encore implémentée dans le générateur de trames : seule la PWM à porteuse est disponible pour l’instant.").arg(v.value("modulation").isEmpty() ? "non choisie" : v.value("modulation"));
+  +    // v59 : la PWM multiniveaux est acceptee (trames = sorties des comparateurs, voir MliSimulator::run)
+  +    if (v.value("modulation") != "PWM" && v.value("modulation") != "PWM multiniveaux")
+  +        return QString("La modulation « %1 » n’est pas encore implémentée dans le générateur de trames : PWM et PWM multiniveaux (porteuses) seulement.").arg(v.value("modulation").isEmpty() ? "non choisie" : v.value("modulation"));
+       if (a.mli->filter.active && a.mli->filter.def.format != "FIR") return "Le générateur n’applique pour l’instant que des filtres FIR : désactivez le filtre ou chargez des coefficients FIR.";
+       double m; if (!num(a.mli->preview.value("indice"), &m) || m <= 0) return "La profondeur de modulation doit être strictement positive.";
+       if (a.mli->frames().isEmpty()) return "Aucune trame binaire pour cette sélection.";
+  --------------------------------------------------------------------------
+
+  >>> Fichier : src/ConfigWindow.cpp   (vers la ligne 737)
+  --------------------------------------------------------------------------
+       if (m_amps[i].cls && m_amps[i].cls->value() == kClassAB) return fail(QString("l’ampli %1 est en classe AB").arg(ampId));
+       const MliModel& src = *m_amps[i].mli;
+       { const QString e = m_amps[i].cfg ? m_amps[i].cfg->validate() : QString(); if (!e.isEmpty()) return fail("réglages MLI : " + e); }
+  -    if (src.variables.value("modulation") != "PWM") return fail("seule la modulation PWM à porteuse est gérée par le générateur de trames (réglages MLI › étape 3)");
+  +    if (src.variables.value("modulation") != "PWM" && src.variables.value("modulation") != "PWM multiniveaux")
+  +        return fail("seules les modulations PWM et PWM multiniveaux sont gérées par le générateur de trames (réglages MLI › étape 3)");   // v59
+       if (x.size() < 2 || fs <= 0) return fail("signal de mesure vide");
+       MliModel m;                                      // copie des reglages, sans relire le WAV du disque
+       m.variables = src.variables; m.preview = src.preview; m.assignments = src.assignments; m.legacy = src.legacy;
+  --------------------------------------------------------------------------
+
+
+==============================================================================
+PARTIE D — POINTS SANS CODE (en attente de vos réponses)
+==============================================================================
+4. « Paramètres du générateur → MLI »
+   Deux lectures possibles :
+     a) déplacer les réglages du générateur dans la page MLI ;
+     b) faire reprendre par la MLI les réglages du générateur (fréquence,
+        niveau…) pour ne pas les saisir deux fois.
+   → Lequel ? Et de quel « générateur » s'agit-il : le PXIe-5413 (classe AB),
+     ou le signal de mesure (salves de la fenêtre Mesure) ?
+
+11. Problème de température
+   → Quel symptôme ? Par exemple :
+     - valeur fausse (écart avec un thermomètre) ou figée ;
+     - une sonde jamais lue (4353 : voie, type de thermocouple) ;
+     - arrêt d'émission qui se déclenche alors que la température est basse,
+       ou qui ne se déclenche pas (limite haute, unité °C / °F) ;
+     - message « surveillance thermique inactive » au démarrage de l'émission.
+   Une photo de l'écran ou du journal (terminal en bas, F10) au moment du
+   problème permettra de corriger directement.
+
+
+==============================================================================
+PARTIE E — ESSAIS À FAIRE AU BANC APRÈS GÉNÉRATION
+==============================================================================
+ [ ] 1  MLI, AB Live, Analyse : Lecture → Pause → Reprendre → Stop ; vérifier
+        que la sortie de la carte s'arrête bien en Pause.
+ [ ] 2  Sonde de courant : choisir la sensibilité ; la mesure de I reste juste ;
+        relire une ancienne configuration.
+ [ ] 3  Curseurs en temporel (U, I, hydrophone) et en FFT ; Δt / 1/Δt sur un
+        signal connu (ex. 10 kHz → Δt = 100 µs sur une période).
+ [ ] 5  Lancement : pas de 8301 dans la liste ; OK / KO cohérents.
+ [ ] 6  Au démarrage : Supervision + Configuration affichées.
+ [ ] 7  Bouton BASE : ajouter une sonde, fermer, vérifier qu'elle apparaît
+        dans les listes de la Configuration.
+ [ ] 8  Plus de bouton rouge ; menu Acquisition › ARRÊT D'URGENCE fonctionne.
+ [ ] 9  Aperçu MLI : molette, glisser, double-clic.
+ [ ] 10 AB : saisir 20 Vcc avec ampli externe coché (limite 12) → ramené à 12
+        + message ; décocher l'ampli externe en 50 Ω → toujours 12 (limite 5413) ;
+        en haute impédance sans ampli externe → 20 accepté.
+ [ ] 12 Multiniveaux 5 niveaux : Générer, puis Lecture avec « Test sans ampli »
+        coché ; vérifier MLI1…MLI8 à l'oscilloscope avant tout essai sous tension.

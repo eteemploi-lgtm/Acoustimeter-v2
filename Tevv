@@ -1,0 +1,112 @@
+ACOUSTIMETER — LISTE DES MODIFICATIONS (feuille du 27/11/2026)
+Ma compréhension, point par point. [?] = à confirmer.
+
+------------------------------------------------------------------
+1. UN SEUL BOUTON LECTURE / PAUSE
+Lu : « Modifier le bouton ▷ ‖ pour mettre sur le même bouton. »
+Compris : aujourd'hui, Lecture et Pause sont deux boutons séparés.
+On les remplace par un seul bouton qui change d'état :
+  - à l'arrêt ou en pause, il affiche ▷ (cliquer = lancer / reprendre) ;
+  - en lecture, il affiche ‖ (cliquer = mettre en pause).
+Le bouton Stop (■) reste à part.
+Concerne la lecture des trames MLI et du signal AB (Configuration et
+Supervision).
+
+------------------------------------------------------------------
+2. RETIRER LE CALIBRE DE LA CONFIGURATION DE LA SONDE
+Lu : « Retirer le calibre dans la configuration de la sonde. »
+Compris : dans Configuration › Sondes, le champ « calibre » disparaît.
+Le logiciel utilise automatiquement le calibre adapté à la carte
+d'acquisition.
+[?] Pour toutes les sondes (tension, courant, hydrophone, température)
+    ou seulement certaines ?
+
+------------------------------------------------------------------
+3. CURSEURS DE MESURE SUR LES COURBES (FFT ET TEMPS)
+Lu : « Ajouter des curseurs pour réaliser des mesures (FFT / Temps). »
+Compris : sur les graphes temporels et FFT, deux curseurs verticaux
+déplaçables à la souris. Pour chaque curseur, affichage de la valeur
+(temps ou fréquence, et amplitude), plus l'écart entre les deux :
+  - en temps : Δt et 1/Δt (fréquence correspondante) ;
+  - en FFT : Δf et l'écart de niveau en dB.
+
+------------------------------------------------------------------
+4. PARAMÈTRES DU GÉNÉRATEUR → MLI
+Lu : « Paramètres du générateur → MLI. »
+Compris : [?] deux lectures possibles :
+  a) déplacer les réglages du générateur (fréquence, niveau, forme)
+     dans la page MLI ;
+  b) faire que les réglages du générateur soient repris par la MLI
+     (même fréquence, même niveau, sans les saisir deux fois).
+→ À préciser.
+
+------------------------------------------------------------------
+5. RETIRER LE NI-PXIe-8301 DU MENU DE LANCEMENT + HARMONISER OK/KO
+Lu : « Retirer le NI-PXIe 8301 dans le menu de lancement.
+       Dans État : harmoniser les OK/KO. »
+Compris :
+  - Le 8301 est le module de liaison Thunderbolt entre le PC et le
+    châssis. Ce n'est pas un instrument de mesure, il ne doit pas
+    apparaître dans la liste des modules au lancement.
+  - Dans la colonne « État », tous les modules utilisent le même
+    affichage : « OK » en vert ou « KO » en rouge, même police, même
+    taille. Fini les libellés différents selon le module.
+
+------------------------------------------------------------------
+6. AU LANCEMENT : AFFICHER SUPERVISION ET CONFIGURATION
+Lu : « Au lancement du logiciel → Affichage supervision et
+       configuration. »
+Compris : après le menu de lancement, la Supervision et la
+Configuration s'ouvrent toutes les deux automatiquement, sans avoir à
+ouvrir la Configuration à la main.
+[?] Les deux fenêtres côte à côte, ou la Configuration au premier plan ?
+
+------------------------------------------------------------------
+7. DÉPLACER « GESTION DE LA BASE » DANS LA SUPERVISION
+Lu : « Déplacer "Gestion de la base" dans les onglets de supervision. »
+Compris : la page Gestion de la base (aujourd'hui dans la
+Configuration) devient un onglet de la Supervision, à côté des autres
+onglets. Elle disparaît de la Configuration.
+
+------------------------------------------------------------------
+8. RETIRER L'ARRÊT D'URGENCE DE LA SUPERVISION
+Lu : « Retirer "Arrêt d'urgence" de l'écran de "Supervision". »
+Compris : le bouton Arrêt d'urgence est retiré de l'écran
+Supervision. L'arrêt normal (STOP) reste.
+[?] Il est retiré seulement de la Supervision, ou de tout le logiciel ?
+    (Je propose : seulement de la Supervision, comme écrit.)
+
+------------------------------------------------------------------
+9. ZOOM SUR LE SIGNAL
+Lu : « Au changement du signal (Ajouter la possibilité de zoomer). »
+Compris : quand on choisit ou change le signal, l'aperçu du signal doit
+pouvoir être zoomé : molette = zoom, glisser = déplacer, double-clic =
+vue complète (comme dans les lecteurs .bin).
+[?] Je ne suis pas sûr du début de la phrase (« Au changement du
+    signal » ?). Et à quel endroit : aperçu du WAV / burst / signal AB
+    dans la Configuration, ou courbes de la Supervision ?
+
+------------------------------------------------------------------
+10. AMPLI CLASSE AB : LIMITE DE LA SORTIE DU PXI À 12 V
+Lu : « Pour ampli classe AB → sortie du PXI.
+       Si l'utilisateur renseigne une valeur maximum à 12 V, bloquer
+       à 12 V.
+       [encadré] Message tension admissible par l'ampli externe. »
+Compris : en classe AB, le PXIe-5413 attaque l'ampli externe. Si
+l'utilisateur saisit une tension supérieure à 12 V :
+  - la valeur est ramenée à 12 V (impossible de dépasser) ;
+  - un message s'affiche, par exemple :
+    « Tension limitée à 12 V : tension maximale admissible à l'entrée
+      de l'ampli externe. »
+[?] 12 V crête ou 12 V efficaces ?
+[?] 12 V fixe, ou valeur réglable dans la configuration de l'ampli
+    (si un autre ampli externe est utilisé un jour) ?
+
+------------------------------------------------------------------
+11. PROBLÈME DE TEMPÉRATURE
+Lu : « Regarder le problème de température. »
+Compris : un problème de température reste à examiner.
+[?] Lequel : valeur fausse ou figée, sonde non lue (4353), mauvaise
+    voie, ou arrêt sur seuil (limite haute) qui se déclenche mal ?
+    → Une description ou une photo de ce qui se passe m'aidera.
+------------------------------------------------------------------
